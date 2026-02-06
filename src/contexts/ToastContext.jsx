@@ -4,13 +4,13 @@ const ToastContext = createContext()
 
 export function ToastProvider({ children }){
   const [toasts, setToasts] = useState([])
-  const show = useCallback((message, type='info', timeout=3000) =>{
+  const showToast = useCallback((message, type='info', timeout=3000) =>{
     const id = Date.now() + Math.random()
     setToasts(t => [...t, { id, message, type }])
     setTimeout(()=> setToasts(t => t.filter(x => x.id !== id)), timeout)
   }, [])
   return (
-    <ToastContext.Provider value={{ show }}>
+    <ToastContext.Provider value={{ showToast }}>
       {children}
       <div style={{position:'fixed',right:20,top:20,display:'flex',flexDirection:'column',gap:8,zIndex:1000}}>
         {toasts.map(t => (

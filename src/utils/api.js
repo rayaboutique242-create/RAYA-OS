@@ -90,6 +90,18 @@ export async function logoutUser(){
   clearTokens()
 }
 
+// Bootstrap: Create first tenant + admin with activation code
+export async function bootstrapTenant(data) {
+  const res = await request('/auth/bootstrap', { method: 'POST', body: JSON.stringify(data) })
+  if(res.accessToken) setToken(res.accessToken)
+  if(res.refreshToken) setRefreshToken(res.refreshToken)
+  return res
+}
+
+// Verify activation code
+export async function verifyActivationCode(code) {
+  return request('/auth/activate', { method: 'POST', body: JSON.stringify({ code }) })
+}
 
 // Fallback local helpers (kept for offline use)
 export async function createTenantLocal(data){

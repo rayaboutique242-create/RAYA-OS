@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { createTenantLocal, registerUserLocal, createTenant, registerUser, getMe, setToken } from '../utils/api'
+import { createTenantLocal, registerUserLocal, bootstrapTenant, registerUser, getMe, setToken, validateInvitation } from '../utils/api'
 
 export default function Onboarding(){
   const [step, setStep] = useState(1) // 1: choose, 2: create, 3: join
@@ -14,6 +14,7 @@ export default function Onboarding(){
   const [city, setCity] = useState('')
   const [pos, setPos] = useState('')
   const [joinCode, setJoinCode] = useState('')
+  const [activationCode, setActivationCode] = useState('')
   const [loading, setLoading] = useState(false)
 
   const { launchRole, setUser } = useAuth()
@@ -23,34 +24,59 @@ export default function Onboarding(){
   
   async function handleCreate(e){
     e?.preventDefault()
-    if(!companyName || !fullName || !password) return alert('Veuillez renseigner le nom, votre nom et un mot de passe')
+    if(!companyName || !fullName || !password || !contact) return alert('Veuillez renseigner tous les champs obligatoires')
+    if(!activationCode) return alert('Veuillez entrer le code d\'activation RAYA')
     setLoading(true)
     try{
-      // Try backend first
-      let tenant, regRes, loginRes
-      try{
-        tenant = await createTenant({ name: companyName, currency, timezone, city, pos })
-        regRes = await registerUser({ name: fullName, email: contact, password, role: 'PDG', companyId: tenant.id })
-        // tokens are set by registerUser helper
-        // attempt to get me
-        try{ loginRes = await getMe() }catch(e){}
-        const user = loginRes || { id: regRes.user?.id || regRes.userId || regRes.id || `U_${Date.now()}`, name: fullName, role: 'pdg', companyId: tenant.id }
-        setUser(user)
-        setTimeout(()=>{ launchRole('pdg') }, 100)
-        return
-      }catch(err){
-        console.warn('Backend onboarding failed, falling back to local:', err.message || err)
+      // Use bootstrap endpoint with activation code
+      const [firstName, ...lastParts] = fullName.trim().split(' ')
+      const lastName = lastParts.join(' ') || ''
+      
+      const res = await bootstrapTenant({
+        activationCode,
+        tenantName: companyName,
+        email: contact,
+        password,
+        firstName,
+        lastName,
+        currency,
+        timezone
+      })
+      
+      const user = {
+        id: res.user?.id || `U_${Date.now()}`,
+        name: fullName,
+        email: contact,
+        role: 'pdg',
+        companyId: res.tenant?.id || res.user?.tenantId
       }
-
-      // Fallback local
-      const t = await createTenantLocal({ name: companyName, currency, timezone, city, pos })
-      const userRes = await registerUserLocal({ name: fullName, email: contact, password, role: 'pdg', companyId: t.id })
-      const user = { id: userRes.id, name: userRes.name, role: 'pdg', companyId: t.id }
       setUser(user)
       setTimeout(()=>{ launchRole('pdg') }, 100)
-    }catch(e){
-      console.error('onboarding create error', e)
-      alert('Erreur: ' + (e?.message || e))
+      return
+    }catch(err){
+      console.error('Bootstrap failed:', err.message || err)
+      // Try fallback to local if backend fails
+      if(err.message?.includes('activation') || err.message?.includes('Code')) {
+        alert('Code d\'activation invalide. Utilisez le code fourni par RAYA.')
+        setLoading(false)
+        return
+      }
+      if(err.message?.includes('existe')) {
+        alert(err.message)
+        setLoading(false)
+        return
+      }
+      
+      // Fallback local
+      try {
+        const t = await createTenantLocal({ name: companyName, currency, timezone, city, pos })
+        const userRes = await registerUserLocal({ name: fullName, email: contact, password, role: 'pdg', companyId: t.id })
+        const user = { id: userRes.id, name: userRes.name, role: 'pdg', companyId: t.id }
+        setUser(user)
+        setTimeout(()=>{ launchRole('pdg') }, 100)
+      } catch(localErr) {
+        alert('Erreur: ' + (localErr?.message || err?.message || 'Création impossible'))
+      }
     }finally{ setLoading(false) }
   }
 
@@ -113,10 +139,20 @@ export default function Onboarding(){
 
       {step === 2 && mode === 'create' && (
         <form onSubmit={handleCreate} style={{display:'grid',gap:10,marginTop:14,maxWidth:520}}>
-          <input placeholder="Nom de l'entreprise" value={companyName} onChange={e=>setCompanyName(e.target.value)} />
-          <input placeholder="Votre nom" value={fullName} onChange={e=>setFullName(e.target.value)} />
-          <input placeholder="Email / contact" value={contact} onChange={e=>setContact(e.target.value)} />
-          <input type="password" placeholder="Mot de passe" value={password} onChange={e=>setPassword(e.target.value)} />
+          <div style={{padding:12,backgroundColor:'#f0f7ff',borderRadius:8,marginBottom:8}}>
+            <label style={{fontSize:13,fontWeight:600,color:'#1976d2'}}>Code d'activation RAYA *</label>
+            <input 
+              placeholder="Ex: RAYA2026" 
+              value={activationCode} 
+              onChange={e=>setActivationCode(e.target.value.toUpperCase())}
+              style={{marginTop:4,fontWeight:'bold',letterSpacing:1}}
+            />
+            <small style={{color:'#666',fontSize:11}}>Entrez le code fourni par RAYA pour activer votre compte</small>
+          </div>
+          <input placeholder="Nom de l'entreprise *" value={companyName} onChange={e=>setCompanyName(e.target.value)} required />
+          <input placeholder="Votre nom complet *" value={fullName} onChange={e=>setFullName(e.target.value)} required />
+          <input type="email" placeholder="Email *" value={contact} onChange={e=>setContact(e.target.value)} required />
+          <input type="password" placeholder="Mot de passe *" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6} />
           <div style={{display:'flex',gap:8}}>
             <input placeholder="Ville principale" value={city} onChange={e=>setCity(e.target.value)} />
             <input placeholder="Point de vente (pos)" value={pos} onChange={e=>setPos(e.target.value)} />
