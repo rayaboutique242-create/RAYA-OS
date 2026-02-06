@@ -1,0 +1,4 @@
+html.pdg-dark { background: linear-gradient(135deg,#4f46e5,#7c3aed); color: white }
+body { font-family: Inter, system-ui, Arial; margin:0 }
+input { padding:10px; border-radius:8px; border:1px solid #ddd }
+button { padding:10px 14px; border-radius:8px; background:#059669; color:white; border:none }
