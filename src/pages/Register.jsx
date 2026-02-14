@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { registerUser } from '../utils/api'
+import { registerUser, validateInvitation } from '../utils/api'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 
@@ -11,11 +11,34 @@ export default function Register() {
     email: '',
     password: '',
     confirmPassword: '',
+    invitationCode: '',
   })
   const [loading, setLoading] = useState(false)
+  const [validatedTenant, setValidatedTenant] = useState(null)
   const navigate = useNavigate()
   const { setUser } = useAuth()
   const { showToast } = useToast()
+
+  async function handleValidateCode() {
+    if (!form.invitationCode.trim()) {
+      showToast('Veuillez entrer un code d\'invitation', 'error')
+      return
+    }
+    setLoading(true)
+    try {
+      const res = await validateInvitation(form.invitationCode.trim())
+      if (res.valid) {
+        setValidatedTenant({ tenantId: res.tenantId, role: res.role })
+        showToast(`Code valide ! Vous rejoindrez en tant que ${res.role}`, 'success')
+      } else {
+        showToast('Code invalide ou expiré', 'error')
+      }
+    } catch (err) {
+      showToast(err.message || 'Code invalide', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -30,8 +53,13 @@ export default function Register() {
       return
     }
     
-    if (form.password.length < 8) {
-      showToast('Le mot de passe doit contenir au moins 8 caractères', 'error')
+    if (form.password.length < 6) {
+      showToast('Le mot de passe doit contenir au moins 6 caractères', 'error')
+      return
+    }
+
+    if (!validatedTenant) {
+      showToast('Veuillez d\'abord valider un code d\'invitation', 'error')
       return
     }
 
@@ -42,10 +70,12 @@ export default function Register() {
         lastName: form.lastName,
         email: form.email,
         password: form.password,
+        tenantId: validatedTenant.tenantId,
+        role: validatedTenant.role,
       })
       setUser(res.user || res)
       showToast('Compte créé avec succès !', 'success')
-      navigate('/onboarding')
+      navigate('/dashboard')
     } catch (err) {
       showToast(err.message || 'Erreur lors de la création du compte', 'error')
     } finally {
@@ -60,8 +90,46 @@ export default function Register() {
           <span style={styles.logoIcon}>R</span>
           <span style={styles.logoText}>RAYA</span>
         </div>
-        <h1 style={styles.title}>Créer un compte</h1>
-        <p style={styles.subtitle}>Commencez à gérer votre entreprise</p>
+        <h1 style={styles.title}>Rejoindre une entreprise</h1>
+        <p style={styles.subtitle}>Entrez votre code d'invitation pour rejoindre une équipe</p>
+
+        {/* Champ code d'invitation */}
+        <div style={styles.inviteSection}>
+          <div style={styles.field}>
+            <label style={styles.label}>Code d'invitation *</label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                value={form.invitationCode}
+                onChange={e => setForm({ ...form, invitationCode: e.target.value.toUpperCase() })}
+                style={{ ...styles.input, flex: 1 }}
+                placeholder="Ex: THNYUD4Q"
+                disabled={validatedTenant}
+              />
+              {!validatedTenant ? (
+                <button 
+                  type="button" 
+                  onClick={handleValidateCode} 
+                  disabled={loading}
+                  style={styles.validateButton}
+                >
+                  {loading ? '...' : 'Valider'}
+                </button>
+              ) : (
+                <button 
+                  type="button" 
+                  onClick={() => setValidatedTenant(null)} 
+                  style={styles.changeButton}
+                >
+                  Modifier
+                </button>
+              )}
+            </div>
+            {validatedTenant && (
+              <p style={styles.validCode}>✓ Code valide - Rôle: {validatedTenant.role}</p>
+            )}
+          </div>
+        </div>
 
         <form onSubmit={handleSubmit} style={styles.form}>
           <div style={styles.row}>
@@ -123,8 +191,8 @@ export default function Register() {
             />
           </div>
 
-          <button type="submit" disabled={loading} style={styles.button}>
-            {loading ? 'Création...' : 'Créer mon compte'}
+          <button type="submit" disabled={loading || !validatedTenant} style={styles.button}>
+            {loading ? 'Création...' : 'Rejoindre l\'équipe'}
           </button>
         </form>
 
@@ -161,6 +229,10 @@ export default function Register() {
         <p style={styles.loginText}>
           Déjà un compte ?{' '}
           <Link to="/login" style={styles.loginLink}>Se connecter</Link>
+        </p>
+        <p style={styles.createText}>
+          Vous voulez créer votre propre entreprise ?{' '}
+          <Link to="/onboarding" style={styles.createLink}>Créer une entreprise</Link>
         </p>
       </div>
     </div>
@@ -299,6 +371,54 @@ const styles = {
     fontSize: 14,
   },
   loginLink: {
+    color: '#059669',
+    fontWeight: '500',
+    textDecoration: 'none',
+  },
+  inviteSection: {
+    marginBottom: 20,
+  },
+  validateButton: {
+    width: '100%',
+    marginTop: 12,
+    padding: '12px 20px',
+    background: '#059669',
+    color: 'white',
+    border: 'none',
+    borderRadius: 8,
+    fontSize: 14,
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'background 0.2s',
+  },
+  changeButton: {
+    background: 'none',
+    border: 'none',
+    color: '#059669',
+    cursor: 'pointer',
+    fontSize: 12,
+    marginLeft: 8,
+  },
+  validCode: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '12px 16px',
+    background: '#ecfdf5',
+    borderRadius: 8,
+    marginTop: 8,
+  },
+  createText: {
+    textAlign: 'center',
+    marginTop: 16,
+    marginBottom: 20,
+    color: '#666',
+    fontSize: 14,
+    padding: '16px',
+    background: '#f9fafb',
+    borderRadius: 8,
+  },
+  createLink: {
     color: '#059669',
     fontWeight: '500',
     textDecoration: 'none',

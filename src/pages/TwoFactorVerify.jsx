@@ -90,13 +90,17 @@ export default function TwoFactorVerify() {
 
       // Login successful - use the full token
       if (data.accessToken) {
-        login({ token: data.accessToken, user: data.user })
+        const { setToken, setRefreshToken } = await import('../utils/api')
+        setToken(data.accessToken)
+        if (data.refreshToken) setRefreshToken(data.refreshToken)
+        await login(data.user || { email: 'user' })
         sessionStorage.removeItem('2fa_temp_token')
         showToast('Connexion réussie !', 'success')
         navigate('/dashboard')
       } else {
-        // If no new token, use the temp token
-        login({ token: tempToken })
+        const { setToken } = await import('../utils/api')
+        setToken(tempToken)
+        await login({ email: 'user' })
         sessionStorage.removeItem('2fa_temp_token')
         showToast('Connexion réussie !', 'success')
         navigate('/dashboard')
@@ -136,9 +140,14 @@ export default function TwoFactorVerify() {
 
       // Login successful
       if (data.accessToken) {
-        login({ token: data.accessToken, user: data.user })
+        const { setToken, setRefreshToken } = await import('../utils/api')
+        setToken(data.accessToken)
+        if (data.refreshToken) setRefreshToken(data.refreshToken)
+        await login(data.user || { email: 'user' })
       } else {
-        login({ token: tempToken })
+        const { setToken } = await import('../utils/api')
+        setToken(tempToken)
+        await login({ email: 'user' })
       }
       sessionStorage.removeItem('2fa_temp_token')
       showToast('Connexion réussie ! Pensez à régénérer vos codes de récupération.', 'success')

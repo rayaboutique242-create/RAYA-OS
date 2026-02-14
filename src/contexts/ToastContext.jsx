@@ -9,13 +9,22 @@ export function ToastProvider({ children }){
     setToasts(t => [...t, { id, message, type }])
     setTimeout(()=> setToasts(t => t.filter(x => x.id !== id)), timeout)
   }, [])
+
+  const colors = { error: '#fee2e2', success: '#dcfce7', info: '#eef2ff', warning: '#fef3c7' }
+  const icons = { error: '❌', success: '✅', info: 'ℹ️', warning: '⚠️' }
+
   return (
-    <ToastContext.Provider value={{ showToast }}>
+    <ToastContext.Provider value={{ showToast, show: showToast }}>
       {children}
-      <div style={{position:'fixed',right:20,top:20,display:'flex',flexDirection:'column',gap:8,zIndex:1000}}>
+      <div style={{position:'fixed',right:20,top:20,display:'flex',flexDirection:'column',gap:8,zIndex:9999,pointerEvents:'none'}}>
         {toasts.map(t => (
-          <div key={t.id} style={{padding:12,background:t.type==='error'?'#fee2e2':t.type==='success'?'#dcfce7':'#eef2ff',borderRadius:8,boxShadow:'0 2px 6px rgba(0,0,0,0.06)'}}>
-            <div style={{fontSize:13}}>{t.message}</div>
+          <div key={t.id} style={{
+            padding:'12px 16px', background: colors[t.type] || colors.info, borderRadius:10,
+            boxShadow:'0 4px 12px rgba(0,0,0,0.1)', display:'flex', alignItems:'center', gap:8,
+            animation:'slideIn 0.3s ease', pointerEvents:'auto', minWidth: 250, maxWidth: 400,
+          }}>
+            <span>{icons[t.type] || icons.info}</span>
+            <div style={{fontSize:13, flex:1}}>{t.message}</div>
           </div>
         ))}
       </div>

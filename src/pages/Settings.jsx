@@ -2,26 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import TwoFactorSettings from '../components/TwoFactorSettings'
-
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000/api'
-
-async function apiRequest(path, options = {}) {
-  const token = localStorage.getItem('raya_token')
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token && { Authorization: `Bearer ${token}` }),
-      ...options.headers,
-    },
-    credentials: 'include',
-  })
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}))
-    throw new Error(data.message || res.statusText)
-  }
-  return res.json()
-}
+import { request as apiRequest } from '../utils/api'
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState('profile')
