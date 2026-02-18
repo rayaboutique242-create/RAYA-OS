@@ -4714,10 +4714,112 @@ select.form-input { cursor: pointer; }
                 }
             }
 
+            // MIGRATION v2.7: Re-cleanup fake/demo data (cloud-sync may reintroduce after v2.6 ran)
+            if (!localStorage.getItem('raya_cleanup_v2_7')) {
+                console.log('[MIGRATION v2.7] Re-cleaning fake/demo data...');
+                let cleaned27 = this._sanitizeFakeData();
+                localStorage.setItem('raya_cleanup_v2_7', '1');
+                if (cleaned27) {
+                    ['orders', 'clients', 'deliveries', 'products', 'suppliers', 'categories', 'shiftTemplates',
+                     'vendorBadges', 'mobileMoneProviders', 'alertRules', 'alertThresholds', 'financialTargets',
+                     'reportTemplates', 'productAttributeTypes', 'incidents', 'notifications'].forEach(col => {
+                        if (this.db[col]) this.markDirty(col);
+                    });
+                    this.save();
+                    console.log('[MIGRATION v2.7] ✅ Re-cleanup complete & marked for cloud push');
+                } else {
+                    console.log('[MIGRATION v2.7] No fake data found');
+                }
+            }
+
             // MIGRATION: Initialiser posStocks pour les produits existants
             this.migrateProductsToPosStocks();
             // CRDT: Load event queue
             this.loadEventQueue();
+        },
+
+        /**
+         * Persistent sanitizer: removes all known fake/demo data patterns.
+         * Called by migrations AND after every cloud sync to prevent reintroduction.
+         * Returns true if anything was cleaned.
+         */
+        _sanitizeFakeData() {
+            let cleaned = false;
+            try {
+                // Fake orders CMD-0001 to CMD-0014 + test/demo prefixed
+                if (this.db.orders && this.db.orders.length > 0) {
+                    const before = this.db.orders.length;
+                    this.db.orders = this.db.orders.filter(o => {
+                        const id = (o.id || '').toString();
+                        const num = (o.orderNumber || o.reference || '').toString();
+                        if (/^CMD-00(0[1-9]|1[0-4])$/.test(num)) return false;
+                        if (/^CMD-00(0[1-9]|1[0-4])$/.test(id)) return false;
+                        if (id.startsWith('test_order_') || id.startsWith('demo_')) return false;
+                        const cn = (o.clientName || '').toLowerCase();
+                        if (cn.includes('marcel bakala') || cn.includes('sylvie moukoko')) return false;
+                        return true;
+                    });
+                    if (this.db.orders.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.orders.length, 'fake orders'); }
+                }
+                // Fake clients
+                if (this.db.clients && this.db.clients.length > 0) {
+                    const before = this.db.clients.length;
+                    this.db.clients = this.db.clients.filter(c => {
+                        const n = (c.name || '').toLowerCase();
+                        if (n.includes('marcel bakala') || n.includes('sylvie moukoko')) return false;
+                        const id = (c.id || '').toString();
+                        if (id.startsWith('test_client_') || id.startsWith('demo_')) return false;
+                        return true;
+                    });
+                    if (this.db.clients.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.clients.length, 'fake clients'); }
+                }
+                // Fake deliveries
+                if (this.db.deliveries && this.db.deliveries.length > 0) {
+                    const before = this.db.deliveries.length;
+                    this.db.deliveries = this.db.deliveries.filter(d => {
+                        const id = (d.id || '').toString();
+                        if (id.startsWith('test_delivery_') || id.startsWith('demo_')) return false;
+                        const oid = (d.orderId || '').toString();
+                        if (/^CMD-00(0[1-9]|1[0-4])$/.test(oid)) return false;
+                        return true;
+                    });
+                    if (this.db.deliveries.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.deliveries.length, 'fake deliveries'); }
+                }
+                // Fake products (LAIT-001-*, RIZ-001-*, test/demo prefixed)
+                if (this.db.products && this.db.products.length > 0) {
+                    const before = this.db.products.length;
+                    this.db.products = this.db.products.filter(p => {
+                        const id = (p.id || '').toString();
+                        const sku = (p.sku || '').toString();
+                        if (id.startsWith('test_product_') || id.startsWith('demo_')) return false;
+                        if (/^(LAIT|RIZ)-001-/.test(sku) || /^(LAIT|RIZ)-001-/.test(id)) return false;
+                        return true;
+                    });
+                    if (this.db.products.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.products.length, 'fake products'); }
+                }
+                // Fake suppliers (IDs 1-3)
+                if (this.db.suppliers && this.db.suppliers.length > 0) {
+                    const before = this.db.suppliers.length;
+                    this.db.suppliers = this.db.suppliers.filter(s => ![1, 2, 3, '1', '2', '3'].includes(s.id));
+                    if (this.db.suppliers.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.suppliers.length, 'fake suppliers'); }
+                }
+                // Fake categories (IDs 1-5)
+                if (this.db.categories && this.db.categories.length > 0) {
+                    const before = this.db.categories.length;
+                    this.db.categories = this.db.categories.filter(c => ![1, 2, 3, 4, 5, '1', '2', '3', '4', '5'].includes(c.id));
+                    if (this.db.categories.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.categories.length, 'fake categories'); }
+                }
+                // Fake incidents
+                if (this.db.incidents && this.db.incidents.length > 0) {
+                    const before = this.db.incidents.length;
+                    this.db.incidents = this.db.incidents.filter(i => {
+                        const id = (i.id || '').toString();
+                        return !id.startsWith('test_incident_') && !id.startsWith('demo_');
+                    });
+                    if (this.db.incidents.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.incidents.length, 'fake incidents'); }
+                }
+            } catch(e) { console.warn('[SANITIZE] Error:', e); }
+            return cleaned;
         },
 
         migrateProductsToPosStocks() {
@@ -62022,6 +62124,12 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         CORE.db.users = CORE.db.users.filter(function(u) { return !delIds[u.id] && !delIds[String(u.id)] && !delIds[u._apiId]; });
                         if (CORE.db.users.length < beforeCount) console.log('[SYNC-ALL] Filtered out ' + (beforeCount - CORE.db.users.length) + ' deleted user(s) after cloud merge');
                     }
+                }
+
+                // Post-sync: strip any fake/demo data that cloud may have reintroduced
+                if (merged > 0 && typeof CORE._sanitizeFakeData === 'function') {
+                    var sanitized = CORE._sanitizeFakeData();
+                    if (sanitized) console.log('[SYNC-ALL] Post-sync sanitizer removed fake data');
                 }
 
                 // Save the pull timestamp for next incremental sync
