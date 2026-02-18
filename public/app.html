@@ -18152,9 +18152,9 @@ select.form-input { cursor: pointer; }
                                         <div class="flex justify-between items-center mt-1">
                                             <div class="text-emerald-600 font-black">${CORE.formatPrice(CORE.getProductPrice(p.id, userPos))}</div>
                                             <div class="flex items-center gap-2">
-                                                <button onclick="event.stopPropagation(); ManagerModule.showProductInfoModal(${p.id})" class="px-3 py-1 rounded-xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700">Info</button>
-                                                ${variants.length > 0 ? `<button onclick="event.stopPropagation(); VendeurModule.showVariantsList(${p.id})" class="px-3 py-1 rounded-xl bg-purple-600 text-white text-xs font-black hover:bg-purple-700">Var.</button>` : ''}
-                                                <button onclick="event.stopPropagation(); (${isReservationMode} ? VendeurModule.addToReservationCart(${p.id}) : VendeurModule.addToCart(${p.id}))" class="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center text-slate-600 group-hover:bg-emerald-500 group-hover:text-white transition">
+                                                <button onclick="event.stopPropagation(); ManagerModule.showProductInfoModal('${p.id}')" class="px-3 py-1 rounded-xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700">Info</button>
+                                                ${variants.length > 0 ? `<button onclick="event.stopPropagation(); VendeurModule.showVariantsList('${p.id}')" class="px-3 py-1 rounded-xl bg-purple-600 text-white text-xs font-black hover:bg-purple-700">Var.</button>` : ''}
+                                                <button onclick="event.stopPropagation(); (${isReservationMode} ? VendeurModule.addToReservationCart('${p.id}') : VendeurModule.addToCart('${p.id}'))" class="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center text-slate-600 group-hover:bg-emerald-500 group-hover:text-white transition">
                                                     <i data-lucide="plus" class="w-4 h-4"></i>
                                                 </button>
                                             </div>
@@ -18867,7 +18867,7 @@ select.form-input { cursor: pointer; }
                                                   UI.badge('OK', 'emerald')}
                                             </td>
                                             <td class="px-6 py-4 text-center">
-                                                <button onclick="ManagerModule.showEditProductModal(${p.id})" class="px-3 py-1.5 bg-blue-600 text-white text-xs font-black rounded-lg hover:bg-blue-700 transition flex items-center justify-center gap-1">
+                                                <button onclick="ManagerModule.showEditProductModal('${p.id}')" class="px-3 py-1.5 bg-blue-600 text-white text-xs font-black rounded-lg hover:bg-blue-700 transition flex items-center justify-center gap-1">
                                                     ✏️ Éditer
                                                 </button>
                                             </td>
@@ -28800,16 +28800,16 @@ Rapport généré par le système d'IA de gestion du stock
                                             <td class="px-6 py-4 text-right font-bold text-slate-700">${CORE.formatPrice(value)}</td>
                                             <td class="px-6 py-4 text-right">
                                                 <div class="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition">
-                                                    <button onclick="GestionnaireModule.showQuickStockModal(${p.id})" class="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-black hover:bg-emerald-700" title="Entrée stock">
+                                                    <button onclick="GestionnaireModule.showQuickStockModal('${p.id}')" class="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-black hover:bg-emerald-700" title="Entrée stock">
                                                         <i data-lucide="plus" class="w-4 h-4"></i>
                                                     </button>
-                                                    <button onclick="GestionnaireModule.showQuickSortieModal(${p.id})" class="px-3 py-2 rounded-xl bg-red-600 text-white text-xs font-black hover:bg-red-700" title="Sortie stock">
+                                                    <button onclick="GestionnaireModule.showQuickSortieModal('${p.id}')" class="px-3 py-2 rounded-xl bg-red-600 text-white text-xs font-black hover:bg-red-700" title="Sortie stock">
                                                         <i data-lucide="minus" class="w-4 h-4"></i>
                                                     </button>
-                                                    <button onclick="ManagerModule.showEditProductModal(${p.id})" class="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700" title="Éditer produit">
+                                                    <button onclick="ManagerModule.showEditProductModal('${p.id}')" class="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700" title="Éditer produit">
                                                         <i data-lucide="edit" class="w-4 h-4"></i>
                                                     </button>
-                                                    <button onclick="GestionnaireModule.showProductDetailModal(${p.id})" class="px-3 py-2 rounded-xl bg-slate-200 text-slate-700 text-xs font-black hover:bg-slate-300" title="Détails">
+                                                    <button onclick="GestionnaireModule.showProductDetailModal('${p.id}')" class="px-3 py-2 rounded-xl bg-slate-200 text-slate-700 text-xs font-black hover:bg-slate-300" title="Détails">
                                                         <i data-lucide="eye" class="w-4 h-4"></i>
                                                     </button>
                                                 </div>
@@ -41767,7 +41767,7 @@ Rapport généré par le système d'IA de gestion du stock
         showNewProductModal(forcedPos = null) {
             const currentUser = CORE.state.currentUser || {};
             const categories = CORE.db.categories.map(c => ({value: c.id, label: c.name}));
-            const posList = CORE.db.pointsOfSale.map(p => ({value: p.id, label: p.name}));
+            const posList = (CORE.db.pointsOfSale || []).map(p => ({value: p.id, label: p.name}));
 
             // Si gestionnaire assigné à un POS, forcer ce POS et le rendre non-modifiable
             const hasAssignedPos = currentUser.role === 'gestionnaire' && currentUser.pos;
@@ -42378,7 +42378,7 @@ Rapport généré par le système d'IA de gestion du stock
                 </div>
             `, [
                 { label: 'Fermer', onclick: 'UI.closeModal()' },
-                { label: 'Éditer', onclick: 'ManagerModule.showEditProductModal(' + p.id + ')', class: 'px-5 py-2.5 bg-slate-900 text-white font-black rounded-xl hover:bg-slate-800 transition' }
+                { label: 'Éditer', onclick: 'ManagerModule.showEditProductModal(\'' + p.id + '\')', class: 'px-5 py-2.5 bg-slate-900 text-white font-black rounded-xl hover:bg-slate-800 transition' }
             ]);
         },
 
@@ -46319,7 +46319,8 @@ Rapport généré par le système d'IA de gestion du stock
             const posId = forcedPosId ?? (this.state.inventoryPosId || null);
             const pos = posId ? CORE.getPOS(posId) : null;
             const allowPosSwitch = !forcedPosId && !hidePosSelector;
-            const visiblePosList = allowPosSwitch ? (pos ? [pos] : CORE.db.pointsOfSale) : (pos ? [pos] : []);
+            const allPos = CORE.db.pointsOfSale || [];
+            const visiblePosList = allowPosSwitch ? (pos ? [pos] : allPos) : (pos ? [pos] : []);
 
             // Filter products by POS if selected
             const matchesSelectedPos = (product) => this.productBelongsToPos(product, posId);
@@ -46375,7 +46376,7 @@ Rapport généré par le système d'IA de gestion du stock
                 .slice(0, 5);
 
             const posOptions = allowPosSwitch
-                ? [{value:'',label:'Tous les POS'}, ...CORE.db.pointsOfSale.map(p=>({value:p.id,label:p.name}))]
+                ? [{value:'',label:'Tous les POS'}, ...allPos.map(p=>({value:p.id,label:p.name}))]
                 : (pos ? [{ value: pos.id, label: pos.name }] : []);
 
             return `
@@ -46591,9 +46592,9 @@ Rapport généré par le système d'IA de gestion du stock
                                                 <td class="px-6 py-4">${p.active ? UI.badge('Actif','emerald') : UI.badge('Inactif','slate')} ${isLow ? `<span class="ml-2">${UI.badge('Critique','red')}</span>` : ''}</td>
                                                 <td class="px-6 py-4 text-right">
                                                     <div class="flex items-center justify-end gap-2">
-                                                        <button onclick="ManagerModule.showProductInfoModal(${p.id})" class="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700" title="Détails produit">Info</button>
-                                                        <button onclick="ManagerModule.showAdvancedStockModal(${p.id})" class="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-black hover:bg-emerald-700">Stock</button>
-                                                        <button onclick="ManagerModule.showEditProductModal(${p.id})" class="px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-black hover:bg-slate-50">Éditer</button>
+                                                        <button onclick="ManagerModule.showProductInfoModal('${p.id}')" class="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700" title="Détails produit">Info</button>
+                                                        <button onclick="ManagerModule.showAdvancedStockModal('${p.id}')" class="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-black hover:bg-emerald-700">Stock</button>
+                                                        <button onclick="ManagerModule.showEditProductModal('${p.id}')" class="px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-black hover:bg-slate-50">Éditer</button>
                                                     </div>
                                                 </td>
                                             </tr>`;
@@ -47156,13 +47157,13 @@ Rapport généré par le système d'IA de gestion du stock
                                                         <button onclick="ManagerModule.quickRestock(${p.id})" class="p-2 rounded-lg hover:bg-emerald-100 text-emerald-600 transition" title="Réapprovisionner">
                                                             <i data-lucide="package-plus" class="w-4 h-4"></i>
                                                         </button>
-                                                        <button onclick="ManagerModule.quickTransfer(${p.id})" class="p-2 rounded-lg hover:bg-purple-100 text-purple-600 transition" title="Transférer vers POS">
+                                                        <button onclick="ManagerModule.quickTransfer('${p.id}')" class="p-2 rounded-lg hover:bg-purple-100 text-purple-600 transition" title="Transférer vers POS">
                                                             <i data-lucide="send" class="w-4 h-4"></i>
                                                         </button>
-                                                        <button onclick="ManagerModule.showMainProductModal(${p.id})" class="p-2 rounded-lg hover:bg-blue-100 text-blue-600 transition" title="Détails">
+                                                        <button onclick="ManagerModule.showMainProductModal('${p.id}')" class="p-2 rounded-lg hover:bg-blue-100 text-blue-600 transition" title="Détails">
                                                             <i data-lucide="info" class="w-4 h-4"></i>
                                                         </button>
-                                                        <button onclick="ManagerModule.showEditProductModal(${p.id})" class="p-2 rounded-lg hover:bg-slate-100 text-slate-600 transition" title="Modifier">
+                                                        <button onclick="ManagerModule.showEditProductModal('${p.id}')" class="p-2 rounded-lg hover:bg-slate-100 text-slate-600 transition" title="Modifier">
                                                             <i data-lucide="edit-2" class="w-4 h-4"></i>
                                                         </button>
                                                     </div>
@@ -47468,7 +47469,7 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         renderPOS() {
-            const grouped = CORE.db.pointsOfSale.map(p => ({
+            const grouped = (CORE.db.pointsOfSale || []).map(p => ({
                 ...p,
                 city: CORE.getCity(p.cityId)?.name,
                 orders: CORE.getVisibleOrders().filter(o => o.posId === p.id).length
@@ -48168,8 +48169,8 @@ Rapport généré par le système d'IA de gestion du stock
             const commissions = this.getCommissionsDue();
 
             const scope = this.getFinanceScope();
-            const cityOptions = [{value:'',label:'Toutes villes'}, ...CORE.db.cities.map(c=>({value:c.id,label:c.name}))];
-            const posOptions = [{value:'',label:'Tous POS'}, ...CORE.db.pointsOfSale.map(p=>({value:p.id,label:p.name}))];
+            const cityOptions = [{value:'',label:'Toutes villes'}, ...(CORE.db.cities || []).map(c=>({value:c.id,label:c.name}))];
+            const posOptions = [{value:'',label:'Tous POS'}, ...(CORE.db.pointsOfSale || []).map(p=>({value:p.id,label:p.name}))];
 
             const categories = [
                 { value:'all', label:'Toutes catégories' },
@@ -48590,8 +48591,8 @@ Rapport généré par le système d'IA de gestion du stock
                 if (sortBy === 'name') cmp = (a.name || '').localeCompare(b.name || '');
                 else if (sortBy === 'role') cmp = (a.role || '').localeCompare(b.role || '');
                 else if (sortBy === 'pos') {
-                    const posA = CORE.db.pointsOfSale.find(p => p.id === (a.pos || a.posId))?.name || '';
-                    const posB = CORE.db.pointsOfSale.find(p => p.id === (b.pos || b.posId))?.name || '';
+                    const posA = (CORE.db.pointsOfSale || []).find(p => p.id === (a.pos || a.posId))?.name || '';
+                    const posB = (CORE.db.pointsOfSale || []).find(p => p.id === (b.pos || b.posId))?.name || '';
                     cmp = posA.localeCompare(posB);
                 }
                 return sortOrder === 'desc' ? -cmp : cmp;
@@ -48902,7 +48903,7 @@ Rapport généré par le système d'IA de gestion du stock
                     ${UI.input('mu_avatar','Avatar (2 lettres)','text','', 'Ex: AM', false)}
                     <div class="grid grid-cols-2 gap-3">
                         ${UI.select('mu_city','Ville', CORE.db.cities.map(c=>({value:c.id,label:c.name})), CORE.state.currentUser?.city || 1)}
-                        ${UI.select('mu_pos','Point de vente', CORE.db.pointsOfSale.map(p=>({value:p.id,label:p.name})), CORE.state.currentUser?.pos || 1)}
+                        ${UI.select('mu_pos','Point de vente', (CORE.db.pointsOfSale || []).map(p=>({value:p.id,label:p.name})), CORE.state.currentUser?.pos || 1)}
                     </div>
                     <div class="p-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-600">
                         Notes: la ville/POS sont utiles pour les vendeurs/gestionnaires. Pour les livreurs, c'est optionnel.
@@ -48966,7 +48967,7 @@ Rapport généré par le système d'IA de gestion du stock
 
                     <div class="grid grid-cols-2 gap-3">
                         ${UI.select('eu_city','Ville', CORE.db.cities.map(c=>({value:c.id,label:c.name})), u.city || '')}
-                        ${UI.select('eu_pos','Point de vente', CORE.db.pointsOfSale.map(p=>({value:p.id,label:p.name})), u.pos || '')}
+                        ${UI.select('eu_pos','Point de vente', (CORE.db.pointsOfSale || []).map(p=>({value:p.id,label:p.name})), u.pos || '')}
                     </div>
 
                     ${u.role === 'livreur' ? `
@@ -51170,21 +51171,26 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
                 render() {
-            this.state.theme = this.state.theme;
             const view = this.state.currentView;
-            this.loadThemePreference(); // Charger le thème préféré
-            const content = view === 'settings' ? this.renderSettings() :
-                            view === 'dashboard' ? this.renderDashboard() :
-                            view === 'analytics' ? this.renderAnalyticsDashboard() :
-                            view === 'pos' ? this.renderPOS() :
-                            view === 'inventory' ? this.renderInventory() :
-                            view === 'main-stock' ? this.renderMainStockControlCenter() :
-                            view === 'finance' ? this.renderFinance() :
-                            view === 'team' ? this.renderTeam() :
-                            view === 'commandes' ? this.renderCommandes() :
-                            view === 'isolation' ? this.renderIsolationPanel() :
-                            view === 'toolbox' ? this.renderToolbox() :
-                            this.renderDashboard();
+            this.loadThemePreference();
+            let content;
+            try {
+                content = view === 'settings' ? this.renderSettings() :
+                          view === 'dashboard' ? this.renderDashboard() :
+                          view === 'analytics' ? this.renderAnalyticsDashboard() :
+                          view === 'pos' ? this.renderPOS() :
+                          view === 'inventory' ? this.renderInventory() :
+                          view === 'main-stock' ? this.renderMainStockControlCenter() :
+                          view === 'finance' ? this.renderFinance() :
+                          view === 'team' ? this.renderTeam() :
+                          view === 'commandes' ? this.renderCommandes() :
+                          view === 'isolation' ? this.renderIsolationPanel() :
+                          view === 'toolbox' ? this.renderToolbox() :
+                          this.renderDashboard();
+            } catch(e) {
+                console.error('[ManagerModule] render error for view:', view, e);
+                content = `<div class="p-8"><div class="bg-red-50 border-2 border-red-300 rounded-2xl p-6"><h3 class="text-lg font-black text-red-700">Erreur de rendu: ${view}</h3><p class="text-red-600 mt-2 text-sm font-mono">${String(e.message || e).replace(/</g, '&lt;')}</p><button onclick="ManagerModule.navigateTo('dashboard')" class="mt-4 px-4 py-2 bg-red-600 text-white rounded-xl font-bold">Retour Dashboard</button></div></div>`;
+            }
 
             return `
                 <div class="flex h-screen bg-slate-50 overflow-hidden">
@@ -51847,7 +51853,7 @@ Rapport généré par le système d'IA de gestion du stock
         // GESTION DES POS (PDG)
         // =====================
         renderPOS() {
-            const grouped = CORE.db.pointsOfSale.map(p => ({
+            const grouped = (CORE.db.pointsOfSale || []).map(p => ({
                 ...p,
                 city: CORE.getCity(p.cityId)?.name,
                 orders: CORE.getVisibleOrders().filter(o => o.posId === p.id).length
@@ -52230,7 +52236,7 @@ Rapport généré par le système d'IA de gestion du stock
 
         cityStats() {
             return CORE.db.cities.map(c => {
-                const posIds = CORE.db.pointsOfSale.filter(p => p.cityId === c.id).map(p => p.id);
+                const posIds = (CORE.db.pointsOfSale || []).filter(p => p.cityId === c.id).map(p => p.id);
                 const orders = CORE.getVisibleOrders().filter(o => posIds.includes(o.posId));
                 const revenue = orders.filter(o => o.status === 'delivered').reduce((a,o)=>a+(o.total||0),0);
                 const deliveries = CORE.getVisibleDeliveries().filter(d => {
@@ -53117,7 +53123,7 @@ Rapport généré par le système d'IA de gestion du stock
                         {value:'internal',label:'Interne'}
                     ], 'cash', true)}
                     ${UI.select('pfx_city','Ville', [{value:'',label:'—'}].concat(CORE.db.cities.map(c=>({value:c.id,label:c.name}))), this.state.financeCityId || '')}
-                    ${UI.select('pfx_pos','POS', [{value:'',label:'—'}].concat(CORE.db.pointsOfSale.map(p=>({value:p.id,label:p.name}))), this.state.financePosId || '')}
+                    ${UI.select('pfx_pos','POS', [{value:'',label:'—'}].concat((CORE.db.pointsOfSale || []).map(p=>({value:p.id,label:p.name}))), this.state.financePosId || '')}
                     ${UI.input('pfx_ref','Référence','text','', 'ex: FACT-2026-001', false)}
                     ${UI.textarea('pfx_note','Détails additionnels','', 'ex: précisions supplémentaires...', 3)}
                 </div>
@@ -53201,7 +53207,7 @@ Rapport généré par le système d'IA de gestion du stock
                 { value: 'card', label: '💳 Carte bancaire' }
             ];
 
-            const posOptions = CORE.db.pointsOfSale.map(p => ({value: p.id, label: p.name}));
+            const posOptions = (CORE.db.pointsOfSale || []).map(p => ({value: p.id, label: p.name}));
             const cityOptions = CORE.db.cities.map(c => ({value: c.id, label: c.name}));
 
             UI.modal('Nouveau Revenu', `
@@ -53354,7 +53360,7 @@ Rapport généré par le système d'IA de gestion du stock
             const scope = this.getFinanceScope();
 
             const cityOptions = [{value:'',label:'Toutes villes'}, ...CORE.db.cities.map(c=>({value:c.id,label:c.name}))];
-            const posOptions = [{value:'',label:'Tous POS'}, ...CORE.db.pointsOfSale.map(p=>({value:p.id,label:p.name}))];
+            const posOptions = [{value:'',label:'Tous POS'}, ...(CORE.db.pointsOfSale || []).map(p=>({value:p.id,label:p.name}))];
 
             const categories = [
                 { value:'all', label:'Toutes catégories' },
@@ -53872,7 +53878,7 @@ Rapport généré par le système d'IA de gestion du stock
             const inactiveUsers = CORE.getVisibleUsers().filter(u => !u.active).length;
             if (inactiveUsers > 0) criticalAlerts.push({ type: 'users', count: inactiveUsers, color: 'slate', icon: 'user-x', msg: `${inactiveUsers} utilisateur(s) inactif(s)`, action: "PDGModule.navigateTo('team')" });
 
-            const topPOS = CORE.db.pointsOfSale.map(p => {
+            const topPOS = (CORE.db.pointsOfSale || []).map(p => {
                 const orders = CORE.getVisibleOrders().filter(o => o.posId === p.id);
                 const delivered = orders.filter(o => o.status === 'delivered');
                 const revenue = delivered.reduce((a,o)=>a+(o.total||0),0);
@@ -55721,7 +55727,7 @@ Rapport généré par le système d'IA de gestion du stock
             }).sort((a, b) => b.revenue - a.revenue).slice(0, 5);
 
             // Top POS
-            const topPos = CORE.db.pointsOfSale.map(pos => {
+            const topPos = (CORE.db.pointsOfSale || []).map(pos => {
                 const posOrders = currentOrders.filter(o => o.posId === pos.id);
                 const revenue = posOrders.filter(o => o.status === 'delivered').reduce((a, o) => a + (o.total || 0), 0);
                 return { pos, orders: posOrders.length, revenue };
@@ -64006,7 +64012,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         }
 
                         CORE.db.pointsOfSale = CORE.db.pointsOfSale || [];
-                        if (!CORE.db.pointsOfSale.find(function(p) { return String(p.id) === String(res.store.id); })) {
+                        if (!(CORE.db.pointsOfSale || []).find(function(p) { return String(p.id) === String(res.store.id); })) {
                             CORE.db.pointsOfSale.push({
                                 id: String(res.store.id),
                                 _apiId: String(res.store.id),
