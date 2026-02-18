@@ -16025,7 +16025,7 @@ select.form-input { cursor: pointer; }
                 paymentMethod, // garder le code (cash/mobile/card/cod)
                 paymentStatus,
                 sellerId: CORE.state.currentUser?.id,
-                posId: CORE.state.currentUser?.pos || 1,
+                posId: CORE.user?.pos || 1,
                 cityId: CORE.state.currentUser?.city || 1,
                 clientId: clientId || undefined, // Lier au client existant si trouvï¿½
                 clientName,
@@ -16062,7 +16062,7 @@ select.form-input { cursor: pointer; }
                     deliveryDate,
                     deliveryTime,
                     livreurId: effectiveLivreurId,
-                    posId: CORE.state.currentUser?.pos || 1,
+                    posId: CORE.user?.pos || 1,
                     status: effectiveStatus,
                     amount: total,
                     commission: Math.round(total * 0.05)
@@ -22768,7 +22768,7 @@ select.form-input { cursor: pointer; }
                 method: 'cash',
                 ref,
                 note: fullNote,
-                posId: CORE.state.currentUser?.pos,
+                posId: CORE.user?.pos,
                 cityId: CORE.state.currentUser?.city,
                 settled: true
             });
@@ -23764,7 +23764,7 @@ select.form-input { cursor: pointer; }
         },
 
         renderActivityLog() {
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             const userId = CORE.state.currentUser?.id;
             const userRole = (CORE.state.currentUser?.role || '').toLowerCase();
             const filterType = this.state.activityFilter || 'all';
@@ -26643,7 +26643,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
         },
 
         showAddShiftModal() {
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             const vendeurs = (CORE.getVisibleUsers() || []).filter(u => u.role === 'vendeur' && u.pos === posId);
             const livreurs = (CORE.getVisibleUsers() || []).filter(u => u.role === 'livreur' && u.pos === posId);
             const allUsers = [...vendeurs, ...livreurs];
@@ -26778,7 +26778,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
                 return UI.toast('Sï¿½lectionnez un mode de crï¿½neau', 'warning');
             }
             
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             const shift = CORE.create('shifts', {
                 templateId: templateId || null,
                 manualStartTime: startTime,
@@ -26795,7 +26795,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
         },
 
         showTimeOffModal() {
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             const vendeurs = (CORE.getVisibleUsers() || []).filter(u => u.role === 'vendeur' && u.pos === posId);
             const livreurs = (CORE.getVisibleUsers() || []).filter(u => u.role === 'livreur' && u.pos === posId);
             const allUsers = [...vendeurs, ...livreurs];
@@ -26961,7 +26961,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
             if (next < 0) return UI.toast('Stock ne peut pas ï¿½tre nï¿½gatif', 'error');
             const updates = { stock: next };
             // Also update POS-specific stock
-            const adjPosId = CORE.state.currentUser?.pos;
+            const adjPosId = CORE.user?.pos;
             if (adjPosId && p.posStocks && p.posStocks[adjPosId]) {
                 const newPosStocks = JSON.parse(JSON.stringify(p.posStocks));
                 const curPosStock = newPosStocks[adjPosId].stock || 0;
@@ -27554,7 +27554,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
 
             const updates = { stock: next };
             // Also update POS-specific stock
-            const movPosId = CORE.state.currentUser?.pos;
+            const movPosId = CORE.user?.pos;
             if (movPosId && p.posStocks && p.posStocks[movPosId]) {
                 const newPosStocks = JSON.parse(JSON.stringify(p.posStocks));
                 let nextPos = newPosStocks[movPosId].stock || 0;
@@ -27683,7 +27683,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
                 return UI.toast('Aucun produit ï¿½ importer', 'warning');
             }
 
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             if (!posId) return UI.toast('POS non dï¿½fini', 'error');
 
             let imported = 0, skipped = 0, errors = 0;
@@ -27959,7 +27959,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
                 if (m.type === 'adjust') newStock = m.qty;
 
                 // Mettre ï¿½ jour stock global ET posStocks
-                const impPosId = CORE.state.currentUser?.pos;
+                const impPosId = CORE.user?.pos;
                 const impUpdates = { stock: newStock };
                 if (impPosId && product.posStocks) {
                     const newPosStocks = JSON.parse(JSON.stringify(product.posStocks));
@@ -28756,7 +28756,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
         showQuickStockModal(productId) {
             const p = CORE.getVisibleProducts().find(x => x.id === productId);
             if (!p) return UI.toast('Produit introuvable', 'error');
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             const currentStock = posId ? (CORE.getProductStock(p.id, posId) || p.stock || 0) : (p.stock || 0);
             
             UI.modal(`?? Entrï¿½e Stock: ${p.name}`, `
@@ -28784,7 +28784,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
         showQuickSortieModal(productId) {
             const p = CORE.getVisibleProducts().find(x => x.id === productId);
             if (!p) return UI.toast('Produit introuvable', 'error');
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             const currentStock = posId ? (CORE.getProductStock(p.id, posId) || p.stock || 0) : (p.stock || 0);
             
             UI.modal(`?? Sortie Stock: ${p.name}`, `
@@ -28829,7 +28829,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
             
             if (qty <= 0) return UI.toast('Quantitï¿½ invalide', 'error');
             
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             const currentStock = posId ? (CORE.getProductStock(pReal.id, posId) || pReal.stock || 0) : (pReal.stock || 0);
             const newStock = type === 'in' ? currentStock + qty : currentStock - qty;
             
@@ -28862,7 +28862,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
         // Modal d'inventaire
         showStockInventoryModal() {
             const products = this.getProductsOptimized();
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             
             UI.modal('?? Lancer un Inventaire', `
                 <div class="space-y-4">
@@ -28903,7 +28903,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
 
         exportInventorySheet() {
             const products = this.getProductsOptimized();
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             const pos = posId ? CORE.getPOS(posId) : null;
             const now = new Date().toLocaleDateString('fr-FR');
             
@@ -28979,7 +28979,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
                         const curStock = pReal ? (pReal.stock || 0) : (p.stock || 0);
                         const newStock = curStock + qty;
                         // Mettre ï¿½ jour stock global ET posStocks
-                        const bPosId = CORE.state.currentUser?.pos;
+                        const bPosId = CORE.user?.pos;
                         const bUpdates = { stock: newStock };
                         if (bPosId && pReal && pReal.posStocks) {
                             const newPosStocks = JSON.parse(JSON.stringify(pReal.posStocks));
@@ -28993,7 +28993,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
                             type: 'in',
                             qty: qty,
                             note: 'Rï¿½approvisionnement groupï¿½',
-                            posId: CORE.state.currentUser?.pos,
+                            posId: CORE.user?.pos,
                             userName: CORE.state.currentUser?.name
                         });
                         count++;
@@ -29011,7 +29011,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
             const p = CORE.getVisibleProducts().find(x => x.id === productId);
             if (!p) return UI.toast('Produit introuvable', 'error');
             
-            const posId = CORE.state.currentUser?.pos;
+            const posId = CORE.user?.pos;
             const stock = posId ? (CORE.getProductStock(p.id, posId) || p.stock || 0) : (p.stock || 0);
             const movements = CORE.getVisibleStockMovements()
                 .filter(m => m.productId === productId)
@@ -29064,7 +29064,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
 
         showAddProductModal() {
             const categories = (CORE.db.categories || []).filter(c => !c._deleted);
-            const posId = CORE.state.currentUser?.pos || 1;
+            const posId = CORE.user?.pos || 1;
             
             UI.modal('? Nouveau Produit', `
                 <div class="space-y-4">
@@ -29151,7 +29151,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
             if (!name) return UI.toast('Le nom du produit est requis', 'warning');
             if (price <= 0) return UI.toast('Le prix de vente doit ï¿½tre supï¿½rieur ï¿½ 0', 'warning');
             
-            const posId = CORE.state.currentUser?.pos || 1;
+            const posId = CORE.user?.pos || 1;
             // Initialiser posStocks directement pour ï¿½viter la migration qui peut remettre le stock ï¿½ 0
             const posStocks = {};
             posStocks[posId] = { stock: stock, price: price };
@@ -29675,7 +29675,7 @@ Rapport gï¿½nï¿½rï¿½ par le systï¿½me d'IA de gestion du stock
                 const summaryDest = document.getElementById('gtf_summary_dest');
                 const summaryAfter = document.getElementById('gtf_summary_after');
                 const warning = document.getElementById('gtf_warning');
-                const sourcePosId = CORE.state.currentUser?.pos || 1;
+                const sourcePosId = CORE.user?.pos || 1;
 
                 const updateSummary = function() {
                     const productId = parseInt(productSelect?.value || 0, 10);
@@ -62683,6 +62683,9 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             if (!role) role = CORE.state.currentUser && CORE.state.currentUser.role;
             if (!role) { this.renderOnboarding(); return; }
             role = role.toLowerCase().trim();
+            // Normalize pos from storeId so all downstream code sees the correct POS
+            const cu = CORE.state.currentUser;
+            if (cu && !cu.pos && cu.storeId) { cu.pos = String(cu.storeId); }
             const mod = this.getActiveModule();
             if (mod) {
                 try { if (typeof mod.applyTheme === 'function') mod.applyTheme(); } catch(e){ console.warn('[APP] Module applyTheme failed:', e); }
