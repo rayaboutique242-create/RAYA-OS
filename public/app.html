@@ -46981,7 +46981,7 @@ Rapport généré par le système d'IA de gestion du stock
                                                 ${(p.stock || 0) === 0 ? '🔴 RUPTURE' : '⚠️ Stock critique'}
                                             </div>
                                         </div>
-                                        <button onclick="ManagerModule.quickRestock(${p.id})" class="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-bold hover:bg-slate-50">
+                                        <button onclick="ManagerModule.quickRestock('${p.id}')" class="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-bold hover:bg-slate-50">
                                             +Stock
                                         </button>
                                     </div>
@@ -47146,7 +47146,13 @@ Rapport généré par le système d'IA de gestion du stock
                                                 <div class="text-slate-400">
                                                     <i data-lucide="inbox" class="w-12 h-12 mx-auto mb-3 opacity-50"></i>
                                                     <div class="font-bold">Aucun produit trouvé</div>
-                                                    <div class="text-sm mt-1">Modifiez vos filtres ou ajoutez de nouveaux produits</div>
+                                                    <div class="text-sm mt-1">Total en base: ${(CORE.db.products || []).length} produit(s) • Actifs: ${(CORE.db.products || []).filter(p => p.active !== false).length}</div>
+                                                    <div class="text-xs mt-2 text-slate-300">Filtres: statut=${stockFilter}, catégorie=${categoryFilter}, recherche="${searchQuery}"</div>
+                                                    <div class="flex justify-center gap-2 mt-4">
+                                                        <button onclick="ManagerModule.state.inventorySearch='';ManagerModule.state.mainStockCategoryFilter='all';ManagerModule.state.mainStockStatusFilter='all';ManagerModule.state.mainStockPage=1;App.rerender()" class="px-4 py-2 bg-slate-200 text-slate-700 rounded-xl font-bold text-sm">Réinitialiser filtres</button>
+                                                        <button onclick="if(typeof API!=='undefined'&&API.syncAllFromCloud){UI.toast('Synchronisation...','info');API.syncAllFromCloud(true).then(()=>{App.rerender();UI.toast('Sync terminée','success')}).catch(e=>UI.toast('Erreur sync: '+e.message,'error'))}" class="px-4 py-2 bg-blue-600 text-white rounded-xl font-bold text-sm">☁️ Synchroniser</button>
+                                                        <button onclick="ManagerModule.showNewProductModal('main')" class="px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-sm">+ Ajouter un produit</button>
+                                                    </div>
                                                 </div>
                                             </td>
                                         </tr>
@@ -47184,11 +47190,11 @@ Rapport généré par le système d'IA de gestion du stock
                                                 <td class="px-4 py-3 text-right font-bold">${CORE.formatPrice(p.price || 0)}</td>
                                                 <td class="px-4 py-3 text-center">
                                                     <div class="inline-flex items-center gap-1">
-                                                        <button onclick="ManagerModule.adjustMainStock(${p.id}, -1)" class="w-6 h-6 rounded bg-slate-200 hover:bg-red-200 transition text-slate-600 font-bold">-</button>
+                                                        <button onclick="ManagerModule.adjustMainStock('${p.id}', -1)" class="w-6 h-6 rounded bg-slate-200 hover:bg-red-200 transition text-slate-600 font-bold">-</button>
                                                         <input type="number" value="${stock}"
-                                                            onchange="CORE.setProductStock(${p.id}, null, this.value); App.rerender()"
+                                                            onchange="CORE.setProductStock('${p.id}', null, this.value); App.rerender()"
                                                             class="w-16 text-center bg-white border border-slate-200 rounded px-2 py-1 font-black focus:ring-2 focus:ring-blue-500 outline-none" min="0">
-                                                        <button onclick="ManagerModule.adjustMainStock(${p.id}, 1)" class="w-6 h-6 rounded bg-slate-200 hover:bg-emerald-200 transition text-slate-600 font-bold">+</button>
+                                                        <button onclick="ManagerModule.adjustMainStock('${p.id}', 1)" class="w-6 h-6 rounded bg-slate-200 hover:bg-emerald-200 transition text-slate-600 font-bold">+</button>
                                                     </div>
                                                 </td>
                                                 <td class="px-4 py-3 text-center text-sm text-slate-500">${minStock}</td>
@@ -47209,7 +47215,7 @@ Rapport généré par le système d'IA de gestion du stock
                                                 </td>
                                                 <td class="px-4 py-3">
                                                     <div class="flex items-center justify-end gap-1 opacity-60 group-hover:opacity-100 transition">
-                                                        <button onclick="ManagerModule.quickRestock(${p.id})" class="p-2 rounded-lg hover:bg-emerald-100 text-emerald-600 transition" title="Réapprovisionner">
+                                                        <button onclick="ManagerModule.quickRestock('${p.id}')" class="p-2 rounded-lg hover:bg-emerald-100 text-emerald-600 transition" title="Réapprovisionner">
                                                             <i data-lucide="package-plus" class="w-4 h-4"></i>
                                                         </button>
                                                         <button onclick="ManagerModule.quickTransfer('${p.id}')" class="p-2 rounded-lg hover:bg-purple-100 text-purple-600 transition" title="Transférer vers POS">
@@ -47275,7 +47281,7 @@ Rapport généré par le système d'IA de gestion du stock
 
         // Fonctions auxiliaires pour le Stock Control Center
         adjustMainStock(productId, delta) {
-            const product = CORE.getVisibleProducts().find(p => p.id === productId);
+            const product = CORE.getVisibleProducts().find(p => String(p.id) === String(productId));
             if (!product) return;
             const newStock = Math.max(0, (product.stock || 0) + delta);
             CORE.setProductStock(productId, null, newStock);
@@ -47283,7 +47289,7 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         quickRestock(productId) {
-            const product = CORE.getVisibleProducts().find(p => p.id === productId);
+            const product = CORE.getVisibleProducts().find(p => String(p.id) === String(productId));
             if (!product) return;
 
             UI.modal(`Réapprovisionner: ${product.name}`, `
@@ -47301,7 +47307,7 @@ Rapport généré par le système d'IA de gestion du stock
                 </div>
             `, [
                 { label: 'Annuler', onclick: 'UI.closeModal()' },
-                { label: 'Ajouter au stock', onclick: `ManagerModule.executeQuickRestock(${productId})`, class: 'px-5 py-2.5 bg-emerald-600 text-white font-black rounded-xl hover:bg-emerald-700' }
+                { label: 'Ajouter au stock', onclick: `ManagerModule.executeQuickRestock('${productId}')`, class: 'px-5 py-2.5 bg-emerald-600 text-white font-black rounded-xl hover:bg-emerald-700' }
             ]);
         },
 
@@ -47312,7 +47318,7 @@ Rapport généré par le système d'IA de gestion du stock
             const ref = UI.val('restock_ref').trim() || `RESTOCK-${Date.now()}`;
             const note = UI.val('restock_note').trim();
 
-            const product = CORE.getVisibleProducts().find(p => p.id === productId);
+            const product = CORE.getVisibleProducts().find(p => String(p.id) === String(productId));
             if (!product) return;
 
             const newStock = (product.stock || 0) + qty;
@@ -47340,7 +47346,7 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         quickTransfer(productId) {
-            const product = CORE.getVisibleProducts().find(p => p.id === productId);
+            const product = CORE.getVisibleProducts().find(p => String(p.id) === String(productId));
             if (!product) return;
 
             const posList = CORE.db.pointsOfSale || [];
@@ -47359,18 +47365,18 @@ Rapport généré par le système d'IA de gestion du stock
                 </div>
             `, [
                 { label: 'Annuler', onclick: 'UI.closeModal()' },
-                { label: 'Transférer', onclick: `ManagerModule.executeQuickTransfer(${productId})`, class: 'px-5 py-2.5 bg-purple-600 text-white font-black rounded-xl hover:bg-purple-700' }
+                { label: 'Transférer', onclick: `ManagerModule.executeQuickTransfer('${productId}')`, class: 'px-5 py-2.5 bg-purple-600 text-white font-black rounded-xl hover:bg-purple-700' }
             ]);
         },
 
         executeQuickTransfer(productId) {
-            const posId = parseInt(UI.val('transfer_pos'), 10);
+            const posId = UI.val('transfer_pos');
             const qty = parseInt(UI.val('transfer_qty'), 10);
 
             if (!posId) return UI.toast('Sélectionnez un point de vente', 'warning');
             if (!qty || qty <= 0) return UI.toast('Quantité invalide', 'warning');
 
-            const product = CORE.getVisibleProducts().find(p => p.id === productId);
+            const product = CORE.getVisibleProducts().find(p => String(p.id) === String(productId));
             if (!product) return;
 
             if ((product.stock || 0) < qty) return UI.toast('Stock insuffisant au dépôt', 'error');
@@ -52427,14 +52433,14 @@ Rapport généré par le système d'IA de gestion du stock
 
             // Filtre par POS
             if (posId && posId !== 'all') {
-                const posIdNum = parseInt(posId);
-                products = products.filter(p => p.posId === posIdNum || p.pos === posIdNum);
+                const strPosId = String(posId);
+                products = products.filter(p => String(p.posId) === strPosId || String(p.pos) === strPosId);
             }
 
             // Filtre par catégorie
             if (categoryId && categoryId !== 'all') {
-                const catIdNum = parseInt(categoryId);
-                products = products.filter(p => p.categoryId === catIdNum);
+                const strCatId = String(categoryId);
+                products = products.filter(p => String(p.categoryId) === strCatId || String(p.category) === strCatId);
             }
 
             // Filtre par statut stock
@@ -54685,7 +54691,7 @@ Rapport généré par le système d'IA de gestion du stock
                 const pos = posList.find(pos => pos.id === (p.posId || p.pos));
                 const statusBadge = isOut ? UI.badge('Rupture','red') : isLow ? UI.badge('Bas','amber') : UI.badge('OK','emerald');
 
-                return `<tr class="hover:bg-slate-50 cursor-pointer" onclick="PDGModule.showProductDetail(${p.id})">
+                return `<tr class="hover:bg-slate-50 cursor-pointer" onclick="PDGModule.showProductDetail('${p.id}')">
                     <td class="px-4 py-3">
                         <div class="flex items-center gap-3">
                             <div class="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600 font-bold text-xs">${(p.name || '?').slice(0,2).toUpperCase()}</div>
@@ -61535,13 +61541,20 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
 
                 // P6: Upgraded _mergeCollection with intelligent field-level merge
                 function _mergeCollection(localArr, apiArr) {
+                    // Safety: if API returns empty but local has data, keep local (protects against API errors)
+                    if ((!apiArr || apiArr.length === 0) && localArr && localArr.length > 0) {
+                        console.log('[SYNC] API returned 0 items but local has', localArr.length, '— keeping local data');
+                        return localArr;
+                    }
                     var merged = [];
                     var localByApiId = {};
+                    var apiIdSet = {};
                     for (var n = 0; n < localArr.length; n++) {
                         if (localArr[n]._apiId) localByApiId[String(localArr[n]._apiId)] = localArr[n];
                     }
                     for (var m = 0; m < apiArr.length; m++) {
                         var apiItem = apiArr[m];
+                        apiIdSet[String(apiItem._apiId || apiItem.id)] = true;
                         var localItem = apiItem._apiId ? localByApiId[String(apiItem._apiId)] : null;
                         if (localItem) {
                             // Both exist — use intelligent field merge (API = winner, but local unique fields kept)
@@ -61550,9 +61563,12 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                             merged.push(apiItem);
                         }
                     }
-                    // Keep local-only (unsynced) items
+                    // Keep local-only (unsynced) items AND local items not returned by API (stale but preserve)
                     for (var k = 0; k < localArr.length; k++) {
                         if (!localArr[k]._apiId && !localArr[k]._apiSynced) {
+                            merged.push(localArr[k]);
+                        } else if (localArr[k]._apiId && !apiIdSet[String(localArr[k]._apiId)]) {
+                            // Item was previously synced but API no longer returns it — keep locally
                             merged.push(localArr[k]);
                         }
                     }
@@ -61564,7 +61580,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 if (products.status === 'fulfilled' && products.value && products.value.data) {
                     var apiProducts = products.value.data.map(function(p) { return {
                         id: p.id, _apiId: p.id, _apiSynced: true, name: p.name, sku: p.sku, barcode: p.barcode,
-                        category: p.categoryId, price: p.sellingPrice, purchasePrice: p.purchasePrice,
+                        categoryId: p.categoryId, category: p.categoryId, price: p.sellingPrice, purchasePrice: p.purchasePrice,
                         stock: p.stockQuantity, minStock: p.minStockLevel, unit: p.unit,
                         image: p.imageUrl, active: p.isActive !== false,
                         posId: p.posId ?? p.storeId ?? p.pointOfSaleId ?? p.store_id ?? p.store?.id ?? null,
