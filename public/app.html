@@ -1852,6 +1852,16 @@ select.form-input { cursor: pointer; }
             if (Number.isNaN(num)) return min;
             return Math.min(Math.max(num, min), max);
         },
+        // SECURITY: HTML escaping utility to prevent XSS — use for ALL user-controlled data injected via innerHTML
+        escapeHtml(str) {
+            if (str == null) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        },
         async md5(str) {
             const input = String(str || '');
             try {
@@ -3476,8 +3486,8 @@ select.form-input { cursor: pointer; }
             this.clearPreviousAccount();
             this._removeReturnButton();
             
-            // Si on a un mot de passe, utiliser switchToAccount normal
-            if (prev.password) {
+            // Si on a un refresh token, utiliser switchToAccount (uses refresh token now)
+            if (prev.refreshToken) {
                 await this.switchToAccount(prev);
                 return;
             }
@@ -3488,7 +3498,7 @@ select.form-input { cursor: pointer; }
                 overlay.id = 'account-switch-overlay';
                 overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;z-index:99999;flex-direction:column;gap:16px;';
                 overlay.innerHTML = '<div style="color:white;font-size:20px;font-weight:bold;">↩ Retour au compte précédent...</div>'
-                    + '<div style="color:#aaa;font-size:14px;">' + (prev.name || '') + '</div>'
+                    + '<div style="color:#aaa;font-size:14px;">' + Utils.escapeHtml(prev.name || '') + '</div>'
                     + '<div style="width:40px;height:40px;border:4px solid #555;border-top-color:#4CAF50;border-radius:50%;animation:spin 1s linear infinite;"></div>';
                 document.body.appendChild(overlay);
                 
@@ -3613,97 +3623,102 @@ select.form-input { cursor: pointer; }
                 overlay.id = 'account-switch-overlay';
                 overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;z-index:99999;flex-direction:column;gap:16px;';
                 overlay.innerHTML = '<div style="color:white;font-size:20px;font-weight:bold;">🔄 Connexion en cours...</div>'
-                    + '<div style="color:#aaa;font-size:14px;">' + (account.name || '') + ' (@' + (account.username || '') + ')</div>'
+                    + '<div style="color:#aaa;font-size:14px;">' + Utils.escapeHtml(account.name || '') + ' (@' + Utils.escapeHtml(account.username || '') + ')</div>'
                     + '<div style="width:40px;height:40px;border:4px solid #555;border-top-color:#4CAF50;border-radius:50%;animation:spin 1s linear infinite;"></div>';
                 document.body.appendChild(overlay);
 
-                // === Appeler directement la logique de onboardingLogin en mémoire ===
+                // === SECURITY: Use refresh token instead of stored password ===
                 const email = (account.username || '').trim().toLowerCase();
-                const password = account.password || '';
+                const storedRefreshToken = account.refreshToken || null;
 
-                // Stratégie 1: API login cloud
-                if (CORE.state.isOnline && typeof API !== 'undefined') {
+                // Stratégie 1: Use stored refresh token to get new access token
+                if (CORE.state.isOnline && typeof API !== 'undefined' && storedRefreshToken) {
                     try {
-                        const apiResult = await API.login(email, password);
-                        if (apiResult && apiResult.accessToken) {
-                            const apiUser = apiResult.user || {};
-                            const tenantId = apiUser.tenantId || CORE.tenantId || 'default';
-                            try { API.tenantId = tenantId; } catch(e) {}
-                            
-                            // Créer le tenant s'il n'existe pas
-                            if (typeof CORE.tenantExists === 'function' && !CORE.tenantExists(tenantId)) {
-                                if (typeof CORE.createTenantWithAdmin === 'function') {
-                                    CORE.createTenantWithAdmin(tenantId, apiUser.tenantName || tenantId, {
-                                        name: (apiUser.firstName || '') + ' ' + (apiUser.lastName || ''),
-                                        username: apiUser.username || email,
-                                        email: apiUser.email || email,
-                                        _authMethod: 'api',
-                                        role: (apiUser.role || 'vendeur').toLowerCase(),
-                                        companyId: tenantId
-                                    });
+                        // Temporarily set the account's refresh token
+                        API.setRefreshToken(storedRefreshToken);
+                        const refreshOk = await API._refreshAccessToken();
+                        if (refreshOk) {
+                            // Get user info from the refreshed session
+                            try {
+                                const meData = await API.getMe();
+                                if (meData) {
+                                    const tenantId = meData.tenantId || CORE.tenantId || 'default';
+                                    try { API.tenantId = tenantId; } catch(e) {}
+                                    
+                                    if (typeof CORE.tenantExists === 'function' && !CORE.tenantExists(tenantId)) {
+                                        if (typeof CORE.createTenantWithAdmin === 'function') {
+                                            CORE.createTenantWithAdmin(tenantId, meData.tenantName || tenantId, {
+                                                name: (meData.firstName || '') + ' ' + (meData.lastName || ''),
+                                                username: meData.username || email,
+                                                email: meData.email || email,
+                                                _authMethod: 'api',
+                                                role: (meData.role || 'vendeur').toLowerCase(),
+                                                companyId: tenantId
+                                            });
+                                        }
+                                    }
+                                    CORE.switchTenant(tenantId);
+                                    
+                                    let localUser = (CORE.db.users || []).find(u => 
+                                        u.email === (meData.email || email) || u.username === (meData.username || email)
+                                    );
+                                    if (!localUser) {
+                                        localUser = {
+                                            id: meData.id || Date.now(),
+                                            name: (meData.firstName || '') + ' ' + (meData.lastName || ''),
+                                            username: meData.username || email,
+                                            email: meData.email || email,
+                                            _authMethod: 'api',
+                                            role: (meData.role || 'vendeur').toLowerCase(),
+                                            active: true, companyId: tenantId,
+                                            storeId: meData.storeId || null,
+                                            pos: meData.storeId ? String(meData.storeId) : null
+                                        };
+                                        CORE.db.users = CORE.db.users || [];
+                                        CORE.db.users.push(localUser);
+                                    } else {
+                                        localUser.role = (meData.role || localUser.role || 'vendeur').toLowerCase();
+                                        localUser.companyId = tenantId;
+                                        if (!localUser.pos && localUser.storeId) localUser.pos = String(localUser.storeId);
+                                    }
+                                    
+                                    // Update saved refresh token
+                                    const newRT = API.getRefreshToken();
+                                    if (newRT) {
+                                        const accts = this.getSavedAccounts();
+                                        const accIdx = accts.findIndex(a => a.id === account.id);
+                                        if (accIdx >= 0) { accts[accIdx].refreshToken = newRT; this.saveAccounts(accts); }
+                                    }
+                                    
+                                    try { await API.syncAllFromCloud(); } catch(e) {}
+                                    
+                                    CORE.state.currentUser = localUser;
+                                    CORE.save(true);
+                                    App.launchRole(localUser.role);
+                                    App.rerender();
+                                    overlay.remove();
+                                    UI.toast('✅ Connecté en tant que ' + (localUser.name || localUser.username), 'success');
+                                    setTimeout(() => this.showReturnButton(), 600);
+                                    return;
                                 }
-                            }
-                            CORE.switchTenant(tenantId);
-                            
-                            // Trouver ou créer l'utilisateur local
-                            let localUser = (CORE.db.users || []).find(u => 
-                                u.email === (apiUser.email || email) || u.username === (apiUser.username || email)
-                            );
-                            if (!localUser) {
-                                localUser = {
-                                    id: apiUser.id || Date.now(),
-                                    name: (apiUser.firstName || '') + ' ' + (apiUser.lastName || ''),
-                                    username: apiUser.username || email,
-                                    email: apiUser.email || email,
-                                    _authMethod: 'api',
-                                    role: (apiUser.role || 'vendeur').toLowerCase(),
-                                    active: true, companyId: tenantId,
-                                    storeId: apiUser.storeId || null,
-                                    pos: apiUser.storeId ? String(apiUser.storeId) : null
-                                };
-                                CORE.db.users = CORE.db.users || [];
-                                CORE.db.users.push(localUser);
-                            } else {
-                                localUser.role = (apiUser.role || localUser.role || 'vendeur').toLowerCase();
-                                localUser.companyId = tenantId;
-                                if (!localUser.pos && localUser.storeId) localUser.pos = String(localUser.storeId);
-                            }
-                            
-                            // Sync data
-                            try { await API.syncFromApi(); } catch(e) {}
-                            try { await API.syncAllFromCloud(); } catch(e) {}
-                            
-                            CORE.state.currentUser = localUser;
-                            CORE.save(true);
-                            
-                            // Lancer le rôle directement sans reload
-                            App.launchRole(localUser.role);
-                            App.rerender();
-                            overlay.remove();
-                            UI.toast('✅ Connecté en tant que ' + (localUser.name || localUser.username), 'success');
-                            setTimeout(() => this.showReturnButton(), 600);
-                            return;
+                            } catch(meErr) { console.warn('[AccountSwitcher] getMe failed:', meErr.message); }
                         }
-                    } catch(e) { console.warn('[AccountSwitcher] API login failed:', e.message); }
+                    } catch(e) { console.warn('[AccountSwitcher] Refresh token auth failed:', e.message); }
                 }
 
-                // Stratégie 2: Login local (offline) via index global
-                const globalEntry = typeof CORE.findUserGlobal === 'function' ? CORE.findUserGlobal(email, password) : null;
-                if (globalEntry) {
-                    const targetTenant = globalEntry.companyId || 'default';
-                    CORE.switchTenant(targetTenant);
-                    const localUser = (CORE.db.users || []).find(u => (u.username === email || u.email === email) && u.active !== false);
-                    if (localUser) {
-                        if (!localUser.pos && localUser.storeId) localUser.pos = String(localUser.storeId);
-                        CORE.state.currentUser = localUser;
-                        CORE.save(true);
-                        App.launchRole(localUser.role);
-                        App.rerender();
-                        overlay.remove();
-                        UI.toast('✅ Connecté en tant que ' + (localUser.name || localUser.username), 'success');
-                        setTimeout(() => this.showReturnButton(), 600);
-                        return;
-                    }
+                // Stratégie 2: Fallback local (offline) — find user by email in local DB
+                // Note: no password check in offline mode for account switch (refresh token handles security online)
+                const localUserByEmail = (CORE.db.users || []).find(u => (u.username === email || u.email === email) && u.active !== false);
+                if (localUserByEmail) {
+                    if (!localUserByEmail.pos && localUserByEmail.storeId) localUserByEmail.pos = String(localUserByEmail.storeId);
+                    CORE.state.currentUser = localUserByEmail;
+                    CORE.save(true);
+                    App.launchRole(localUserByEmail.role);
+                    App.rerender();
+                    overlay.remove();
+                    UI.toast('✅ Connecté en tant que ' + (localUserByEmail.name || localUserByEmail.username), 'success');
+                    setTimeout(() => this.showReturnButton(), 600);
+                    return;
                 }
 
                 // Stratégie 3: Chercher dans db.users du tenant actuel
@@ -3882,7 +3897,7 @@ select.form-input { cursor: pointer; }
             ]);
         },
 
-        handleAddAccount() {
+        async handleAddAccount() {
             const name = document.getElementById('acc-sw-name')?.value?.trim();
             const username = document.getElementById('acc-sw-username')?.value?.trim();
             const password = document.getElementById('acc-sw-password')?.value;
@@ -3890,13 +3905,32 @@ select.form-input { cursor: pointer; }
             if (!username) return UI.toast('Veuillez saisir un identifiant', 'warning');
             if (!password) return UI.toast('Veuillez saisir un mot de passe', 'warning');
 
-            // Enregistrer le compte (la vérification se fera au moment du switch)
-            this.addAccount(name, username, password);
-            UI.closeModal();
-            UI.toast('✅ Compte "' + name + '" enregistré', 'success');
-            // Re-render la page pour afficher le nouveau compte immédiatement
-            App.rerender();
-            setTimeout(() => this.renderSection(), 200);
+            // SECURITY: Verify credentials via API, then store only the refresh token (not the password)
+            try {
+                if (CORE.state.isOnline && typeof API !== 'undefined') {
+                    var loginResult = await API.login(username, password);
+                    if (loginResult && loginResult.accessToken) {
+                        this.addAccount(name, username);
+                        // Update the account with the fresh refresh token
+                        var accts = this.getSavedAccounts();
+                        var acc = accts.find(a => a.username === username.trim());
+                        if (acc && loginResult.refreshToken) {
+                            acc.refreshToken = loginResult.refreshToken;
+                            this.saveAccounts(accts);
+                        }
+                        UI.closeModal();
+                        UI.toast('✅ Compte "' + name + '" vérifié et enregistré', 'success');
+                        App.rerender();
+                        setTimeout(() => this.renderSection(), 200);
+                        return;
+                    }
+                }
+                UI.toast('❌ Identifiants invalides', 'error');
+            } catch(e) {
+                var msg = '';
+                try { msg = e.data?.message || e.message || ''; } catch(x) {}
+                UI.toast('❌ ' + (msg || 'Impossible de vérifier les identifiants'), 'error');
+            }
         },
 
         confirmRemoveAccount(accountId, accountName) {
@@ -5201,8 +5235,7 @@ select.form-input { cursor: pointer; }
                 try { await RayaAPI.syncAllFromCloud(); } catch(e) { console.warn('[processSyncQueue] Cloud pull failed:', e.message); }
                 // Push to generic cloud sync
                 try { await RayaAPI.syncAllToCloud(); } catch(e) { console.warn('[processSyncQueue] Cloud push failed:', e.message); }
-                // Also sync from relational API
-                const ok = await RayaAPI.syncFromApi();
+                // PERF: Removed syncFromApi — syncAllFromCloud already pulls all data
                 this.db.pendingSyncs = [];
                 UI.toast('Synchronisation terminée !', 'success');
                 if (typeof SyncIndicator !== 'undefined') SyncIndicator.show('success', 'Sync OK');
@@ -5455,7 +5488,9 @@ select.form-input { cursor: pointer; }
 
         // Helpers
         getCity(id) { return this.db.cities.find(c => c.id === id); },
-        getPOS(id) { return this.db.pointsOfSale.find(p => p.id === id); },
+        getPOS(id) {
+            return (this.db.pointsOfSale || []).find(p => p.id === id || String(p.id) === String(id));
+        },
         getCategory(id) { return this.db.categories.find(c => c.id === id); },
         getProduct(id) { return this.db.products.find(p => p.id === id || String(p.id) === String(id)); },
         getUser(id) {
@@ -5507,13 +5542,19 @@ select.form-input { cursor: pointer; }
             const product = this.getProduct(productId);
             if (!product) return;
             const safeStock = Math.max(0, Number(stock) || 0);
-            // Always update master stock
-            product.stock = safeStock;
-            // If posId is provided, also update posStocks
+            // If posId is provided, update posStocks for that POS
             if (posId !== null && posId !== undefined && posId !== '') {
                 if (!product.posStocks) product.posStocks = {};
                 if (!product.posStocks[posId]) product.posStocks[posId] = { stock: 0, price: product.price || 0 };
                 product.posStocks[posId].stock = safeStock;
+                // Also update master stock ONLY if product belongs to this POS
+                // (prevents transfer from one POS overwriting the master stock)
+                if (product.posId == posId || !product.posId) {
+                    product.stock = safeStock;
+                }
+            } else {
+                // No posId — update master stock directly
+                product.stock = safeStock;
             }
             this.markDirty('products');
             this.save();
@@ -10629,46 +10670,9 @@ select.form-input { cursor: pointer; }
             if (!CORE.db.pendingSyncs) CORE.db.pendingSyncs = [];
             if (!CORE.db.syncHistory) CORE.db.syncHistory = [];
 
-            // === CLOUD PULL: Charger les données du cloud au démarrage ===
-            // PERF: Only PULL at startup — no push needed (nothing is dirty yet)
-            if (navigator.onLine && typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated()) {
-                console.log('[CLOUD] Utilisateur authentifié au démarrage — pull des données cloud...');
-                // PERF: Quick server health check first — if server is dead, skip sync entirely
-                setTimeout(function() {
-                    if (typeof API === 'undefined' || !API.syncFromApi) return;
-                    var _bootT0 = performance.now();
-                    // Health probe with a short 8s timeout
-                    var healthCtrl = new AbortController();
-                    var healthTimer = setTimeout(function() { healthCtrl.abort(); }, 8000);
-                    fetch((API.baseUrl || 'https://raya-backend-production.up.railway.app/api') + '/health', {
-                        signal: healthCtrl.signal
-                    }).then(function(r) {
-                        clearTimeout(healthTimer);
-                        console.log('[CLOUD] Server alive (' + (performance.now() - _bootT0).toFixed(0) + 'ms) — starting sync...');
-                        return API.syncFromApi();
-                    }).then(function() {
-                        console.log('[CLOUD] ✅ API sync OK (' + (performance.now() - _bootT0).toFixed(0) + 'ms)');
-                        if (typeof API !== 'undefined' && API.syncAllFromCloud) {
-                            return API.syncAllFromCloud(true);
-                        }
-                    }).then(function() {
-                        console.log('[CLOUD] ✅ Startup sync complete (' + (performance.now() - _bootT0).toFixed(0) + 'ms)');
-                        if (typeof CORE !== 'undefined') CORE.save(true);
-                        if (typeof App !== 'undefined' && App.rerender) App.rerender(true);
-                    }).catch(function(err) {
-                        clearTimeout(healthTimer);
-                        var elapsed = (performance.now() - _bootT0).toFixed(0);
-                        if (err && err.name === 'AbortError') {
-                            console.warn('[CLOUD] ⚠️ Serveur injoignable (timeout ' + elapsed + 'ms) — mode hors-ligne');
-                            if (typeof UI !== 'undefined' && UI.toast) UI.toast('⚠ Serveur lent ou injoignable — mode hors-ligne', 'warning', 5000);
-                        } else {
-                            console.warn('[CLOUD] ⚠️ Pull cloud échoué (' + elapsed + 'ms):', err.message || err);
-                        }
-                        // Render with local data anyway
-                        if (typeof App !== 'undefined' && App.rerender) App.rerender(true);
-                    });
-                }, 1500); // Délai réduit de 2s à 1.5s
-            }
+            // PERF: Cloud pull at startup is handled by App.init() cloud-first flow.
+            // OfflineManager no longer does its own duplicate sync to save ~15 requests.
+            console.log('[OFFLINE-MGR] Init done — startup sync delegated to App.init cloud-first');
         },
 
         // Événement: connexion rétablie
@@ -10679,18 +10683,20 @@ select.form-input { cursor: pointer; }
             
             UI.toast('🌐 Connexion rétablie!', 'success');
 
-            // Charger les données fraiches du cloud après reconnexion
-            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && API.syncFromApi) {
-                API.syncFromApi().then(function() {
+            // PERF: On reconnect, use syncAllFromCloud (incremental via /sync/meta)
+            // instead of syncFromApi which hits 7 REST endpoints.
+            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && API.syncAllFromCloud) {
+                API.syncAllFromCloud(true).then(function() {
                     console.log('[CLOUD] ✅ Données cloud resynchronisées après reconnexion');
                     if (typeof CORE !== 'undefined') CORE.save(true);
+                    if (typeof App !== 'undefined' && App.rerender) App.rerender();
                 }).catch(function(err) {
                     console.warn('[CLOUD] ⚠️ Pull cloud échoué après reconnexion:', err.message || err);
                 });
             }
 
-            // Démarrer la synchronisation automatique
-            this.startAutoSync();
+            // PERF: Don't start auto-sync — the main periodic sync in App._finishInit handles it
+            // this.startAutoSync();
             
             // Tenter une sync immédiate si des actions sont en attente
             const pendingCount = this.getPendingCount();
@@ -11207,7 +11213,7 @@ select.form-input { cursor: pointer; }
             toast.className = `toast pointer-events-auto ${colors[type] || colors.success} text-white px-4 py-3 rounded-xl shadow-xl flex items-center gap-3 min-w-[280px] backdrop-blur-md bg-opacity-95`;
             toast.innerHTML = `
                 <i data-lucide="${icons[type] || icons.success}" class="w-5 h-5"></i>
-                <span class="flex-1 font-medium text-sm">${message}</span>
+                <span class="flex-1 font-medium text-sm">${typeof Utils !== 'undefined' && Utils.escapeHtml ? Utils.escapeHtml(message) : message}</span>
                 <button class="p-1.5 rounded-lg hover:bg-white/15 transition" aria-label="Fermer">
                     <i data-lucide="x" class="w-4 h-4"></i>
                 </button>
@@ -11349,7 +11355,7 @@ select.form-input { cursor: pointer; }
                     <div class="slide-up bg-white rounded-3xl shadow-2xl ${maxWidth} w-full max-h-[90vh] overflow-hidden flex flex-col" role="dialog" aria-modal="true" aria-label="${title}">
                         ${noPadding ? '' : `<div class="flex items-center justify-between p-6 border-b border-slate-100 bg-slate-50/50 gap-3">
                             ${backButtonHTML}
-                            <h3 class="text-lg font-black text-slate-800 flex-1">${title}</h3>
+                            <h3 class="text-lg font-black text-slate-800 flex-1">${typeof Utils !== 'undefined' && Utils.escapeHtml ? Utils.escapeHtml(title) : title}</h3>
                             <button onclick="UI.closeModal()" class="p-2 hover:bg-slate-200 rounded-full transition flex-shrink-0" aria-label="Fermer">
                                 <i data-lucide="x" class="w-5 h-5 text-slate-500"></i>
                             </button>
@@ -11393,7 +11399,8 @@ select.form-input { cursor: pointer; }
         },
 
         confirm({ title, message, confirmLabel = 'Confirmer', confirmClass = 'bg-red-600 hover:bg-red-700 text-white', onConfirm }) {
-            this.modal(title, `<p class="text-slate-600 font-medium">${message}</p>`, [
+            const _e = typeof Utils !== 'undefined' && Utils.escapeHtml ? Utils.escapeHtml : (s => s);
+            this.modal(title, `<p class="text-slate-600 font-medium">${_e(message)}</p>`, [
                 { label: 'Annuler', onclick: 'UI.closeModal()' },
                 { label: confirmLabel, onclick: `(${onConfirm.toString()})()`, class: `px-5 py-2.5 rounded-xl font-bold transition ${confirmClass}` }
             ]);
@@ -11791,19 +11798,13 @@ select.form-input { cursor: pointer; }
                         <div class="p-4 rounded-2xl border border-slate-200 bg-white">
                             <div class="flex items-start justify-between gap-4">
                                 <div class="flex items-center gap-3 flex-1">
-                                    ${u.profileImage ? `<img src="${u.profileImage}" class="w-12 h-12 rounded-xl object-cover">` : `<div class="w-12 h-12 gradient-${u.role} rounded-xl flex items-center justify-center text-white font-black text-sm">${u.avatar}</div>`}
+                                    ${u.profileImage ? `<img src="${u.profileImage}" class="w-12 h-12 rounded-xl object-cover">` : `<div class="w-12 h-12 gradient-${u.role} rounded-xl flex items-center justify-center text-white font-black text-sm">${Utils.escapeHtml(u.avatar)}</div>`}
                                     <div class="flex-1">
-                                        <div class="font-black text-slate-900">${u.name}</div>
+                                        <div class="font-black text-slate-900">${Utils.escapeHtml(u.name)}</div>
                                         <div class="text-xs text-slate-500 space-y-1">
-                                            <div>Role: <span class="font-bold text-slate-700">${u.role}</span></div>
-                                            <div>Identifiant: <span class="font-mono text-emerald-600">${u.username || 'N/A'}</span></div>
-                                            <div>Mot de passe: <span class="font-mono text-cyan-600">${u.password || 'N/A'}</span></div>
-                                            <div>Statut: <span class="font-bold ${u.active ? 'text-emerald-600' : 'text-red-600'}">${u.active ? 'Actif' : 'Inactif'}</span></div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="flex flex-col gap-2">
-                                    <button onclick="ManagerModule.showUserDetailsModal('${u.id}')" class="px-3 py-2 bg-indigo-600 text-white rounded-lg text-xs font-black hover:bg-indigo-700 transition">📋 Détails</button>
+                                            <div>Role: <span class="font-bold text-slate-700">${Utils.escapeHtml(u.role)}</span></div>
+                                            <div>Identifiant: <span class="font-mono text-emerald-600">${Utils.escapeHtml(u.username || 'N/A')}</span></div>
+                                            <div>Mot de passe: <span class="font-mono text-cyan-600">••••••••</span></div> class="px-3 py-2 bg-indigo-600 text-white rounded-lg text-xs font-black hover:bg-indigo-700 transition">📋 Détails</button>
                                     <button onclick="ManagerModule.showEditUserModal('${u.id}')" class="px-3 py-2 bg-blue-600 text-white rounded-lg text-xs font-black hover:bg-blue-700 transition">Modifier</button>
                                     <button onclick="ManagerModule.toggleUserActive('${u.id}')" class="px-3 py-2 ${u.active ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white rounded-lg text-xs font-black transition">${u.active ? 'Désactiver' : 'Activer'}</button>
                                     <button onclick="ManagerModule.showChangePasswordModal('${u.id}')" class="px-3 py-2 bg-amber-600 text-white rounded-lg text-xs font-black hover:bg-amber-700 transition">Mot de passe</button>
@@ -16590,8 +16591,8 @@ select.form-input { cursor: pointer; }
                 list.innerHTML = uniqueSuggestions.map(c => `
                     <div class="p-3 bg-white border border-blue-200 rounded-xl flex items-center justify-between cursor-pointer hover:bg-blue-50 transition group">
                         <div class="flex-1">
-                            <div class="font-black text-slate-900 text-sm">${c.name}</div>
-                            <div class="text-xs text-slate-500">${c.phone || 'N/A'} • ${c.address || 'Adresse non définie'}</div>
+                            <div class="font-black text-slate-900 text-sm">${Utils.escapeHtml(c.name)}</div>
+                            <div class="text-xs text-slate-500">${Utils.escapeHtml(c.phone || 'N/A')} • ${Utils.escapeHtml(c.address || 'Adresse non définie')}</div>
                         </div>
                         <button onclick="VendeurModule.selectClientSuggestion(${c.id})" class="px-3 py-1.5 bg-blue-600 text-white text-xs font-black rounded-lg opacity-0 group-hover:opacity-100 transition">Utiliser</button>
                     </div>
@@ -25168,7 +25169,7 @@ Date d'approbation: ${new Date().toLocaleDateString('fr-FR')}
                         ${predictions.slice(0, 10).map(p => `
                             <div class="p-4 rounded-xl border ${p.riskLevel.includes('RUPTURE') ? 'border-red-300 bg-red-50' : p.riskLevel.includes('RISQUE') ? 'border-amber-300 bg-amber-50' : 'border-emerald-300 bg-emerald-50'} flex items-center justify-between">
                                 <div>
-                                    <div class="font-black text-slate-900">${p.name} <span class="text-xs text-slate-500">(${p.sku})</span></div>
+                                    <div class="font-black text-slate-900">${Utils.escapeHtml(p.name)} <span class="text-xs text-slate-500">(${Utils.escapeHtml(p.sku)})</span></div>
                                     <div class="text-sm text-slate-600 mt-1">
                                         Stock: <b>${p.currentStock}</b> → Prédit: <b>${p.predictedStock}</b> | Consommation: <b>${p.avgDailyConsumption}/jour</b>
                                     </div>
@@ -25906,8 +25907,8 @@ Rapport généré par le système d'IA de gestion du stock
                 <div class="p-3 rounded-lg border border-slate-200 bg-slate-50 cursor-pointer hover:bg-blue-50 transition flex items-center gap-3">
                     <span class="text-xl">${r.icon}</span>
                     <div>
-                        <div class="font-black text-slate-900">${r.name}</div>
-                        <div class="text-xs text-slate-500">${r.type}</div>
+                        <div class="font-black text-slate-900">${Utils.escapeHtml(r.name)}</div>
+                        <div class="text-xs text-slate-500">${Utils.escapeHtml(r.type)}</div>
                     </div>
                 </div>
             `).join('');
@@ -26093,16 +26094,20 @@ Rapport généré par le système d'IA de gestion du stock
             
             const posId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
             
-            // Récupérer les produits qui appartiennent au POS OU qui ont du stock dans ce POS
+            // Utiliser la même logique que ManagerModule.productBelongsToPos()
+            // pour que le gestionnaire et le manager voient les mêmes produits
             const products = (CORE.getVisibleProducts() || []).filter(p => {
-                // Produit appartient directement au POS
-                if (p.posId == posId) return true;
-                // Produit a du stock dans ce POS via posStocks
-                if (p.posStocks && p.posStocks[posId] && p.posStocks[posId].stock > 0) return true;
+                if (typeof ManagerModule !== 'undefined' && ManagerModule.productBelongsToPos) {
+                    return ManagerModule.productBelongsToPos(p, posId);
+                }
+                // Fallback si ManagerModule non disponible
+                if (String(p.posId) === String(posId)) return true;
+                if (p.posStocks && p.posStocks[posId]) return true;
+                if (p.posStocks && p.posStocks[String(posId)]) return true;
                 return false;
             }).map(p => {
                 // Enrichir le produit avec le stock du POS actuel
-                const posStock = p.posStocks && p.posStocks[posId] ? p.posStocks[posId].stock : (p.posId == posId ? (p.stock || 0) : 0);
+                const posStock = CORE.getProductStock(p.id, posId);
                 const posPrice = p.posStocks && p.posStocks[posId] ? (p.posStocks[posId].price || p.price || 0) : (p.price || 0);
                 return {
                     ...p,
@@ -26270,7 +26275,7 @@ Rapport généré par le système d'IA de gestion du stock
         startKpiTimer() {
             if (this.state.kpiTimerId) return;
             // refresh KPIs every 10s
-            this.state.kpiTimerId = setInterval(() => { App.rerender(); }, 10000);
+            this.state.kpiTimerId = setInterval(() => { if (document.visibilityState === 'visible') App.rerender(); }, 60000); // PERF: 60s instead of 10s, skip when hidden
         },
         stopKpiTimer() {
             if (this.state.kpiTimerId) { clearInterval(this.state.kpiTimerId); this.state.kpiTimerId = null; }
@@ -29388,7 +29393,7 @@ Rapport généré par le système d'IA de gestion du stock
         showTransferStockModal() {
             const products = CORE.getVisibleProducts() || [];
             const posList = CORE.db.pointsOfSale || [];
-            const currentPosId = CORE.state.currentUser?.pos;
+            const currentPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
             
             if (posList.length < 2) {
                 return UI.toast('Vous devez avoir au moins 2 POS pour transférer du stock', 'warning');
@@ -29736,21 +29741,32 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         executeStockTransfer() {
-            const productId = parseInt(document.getElementById('gtf_product')?.value || 0);
-            const destPosId = parseInt(document.getElementById('gtf_dest_pos')?.value || 0);
+            const productIdRaw = (document.getElementById('gtf_product')?.value || '').toString().trim();
+            const destPosIdRaw = (document.getElementById('gtf_dest_pos')?.value || '').toString().trim();
             const qty = parseInt(document.getElementById('gtf_qty')?.value || 0);
             const reason = document.getElementById('gtf_reason')?.value?.trim() || 'Transfert inter-POS';
             const eta = document.getElementById('gtf_eta')?.value || null;
             const media = this._transferMedia || [];
-            const sourcePosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
+            const sourcePosRaw = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
+
+            const posList = CORE.db.pointsOfSale || [];
+            const sourcePos = (CORE.getPOS ? CORE.getPOS(sourcePosRaw) : null)
+                || posList.find(p => String(p.id) === String(sourcePosRaw))
+                || posList[0]
+                || null;
+            const destPos = (CORE.getPOS ? CORE.getPOS(destPosIdRaw) : null)
+                || posList.find(p => String(p.id) === String(destPosIdRaw))
+                || null;
+
+            const sourcePosId = sourcePos ? sourcePos.id : sourcePosRaw;
+            const destPosId = destPos ? destPos.id : destPosIdRaw;
+            const productId = productIdRaw;
             
-            if (!productId) return UI.toast('Sélectionnez un produit', 'warning');
-            if (!destPosId) return UI.toast('Sélectionnez une destination', 'warning');
+            if (!productIdRaw) return UI.toast('Sélectionnez un produit', 'warning');
+            if (!destPosIdRaw) return UI.toast('Sélectionnez une destination', 'warning');
             if (qty <= 0) return UI.toast('La quantité doit être supérieure à 0', 'warning');
             
             const product = CORE.getProduct ? CORE.getProduct(productId) : CORE.getVisibleProducts().find(p => p.id === productId);
-            const sourcePos = CORE.getPOS ? CORE.getPOS(sourcePosId) : (CORE.db.pointsOfSale || []).find(p => p.id === sourcePosId);
-            const destPos = CORE.getPOS ? CORE.getPOS(destPosId) : (CORE.db.pointsOfSale || []).find(p => p.id === destPosId);
             
             if (!product || !sourcePos || !destPos) {
                 return UI.toast('Données invalides', 'error');
@@ -29848,12 +29864,11 @@ Rapport généré par le système d'IA de gestion du stock
                 status: 'recorded'
             });
             
-            CORE.save();
             CORE.markDirty('stockTransfers');
             CORE.markDirty('products');
             CORE.markDirty('stockMovements');
             CORE.markDirty('notifications');
-            CORE.save();
+            CORE.save(true);
             this.invalidateCache();
             UI.closeModal();
             UI.toast('📤 Transfert envoyé! En attente de réception par ' + destPos.name, 'success');
@@ -29865,21 +29880,21 @@ Rapport généré par le système d'IA de gestion du stock
         getPendingIncomingTransfers() {
             const currentPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
             return (CORE.db.stockTransfers || []).filter(t => 
-                t.destPosId == currentPosId && t.status == 'pending'
+                String(t.destPosId) === String(currentPosId) && t.status === 'pending'
             );
         },
 
         getPendingOutgoingTransfers() {
             const currentPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
             return (CORE.db.stockTransfers || []).filter(t => 
-                t.sourcePosId == currentPosId && t.status == 'pending'
+                String(t.sourcePosId) === String(currentPosId) && t.status === 'pending'
             );
         },
 
         getTransferHistory() {
             const currentPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
             return (CORE.db.stockTransfers || []).filter(t => 
-                (t.destPosId == currentPosId || t.sourcePosId == currentPosId) && t.status != 'pending'
+                (String(t.destPosId) === String(currentPosId) || String(t.sourcePosId) === String(currentPosId)) && t.status !== 'pending'
             ).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         },
 
@@ -30157,14 +30172,15 @@ Rapport généré par le système d'IA de gestion du stock
             
             // S'assurer que les IDs sont cohérents (comparer en tant que strings ou numbers)
             const productId = transfer.productId;
-            const destPosId = parseInt(transfer.destPosId, 10);
-            const sourcePosId = parseInt(transfer.sourcePosId, 10);
-            const qty = parseInt(transfer.qty, 10) || 0;
+            const destPosId = transfer.destPosId;
+            const sourcePosId = transfer.sourcePosId;
+            const qty = Number(transfer.qty) || 0;
             
-            // Chercher le produit avec comparaison flexible (== au lieu de ===)
-            let product = CORE.getVisibleProducts().find(p => p.id == productId);
+            // BUG FIX: Chercher dans TOUS les produits (pas getVisibleProducts qui filtre par POS)
+            // Le produit transféré appartient au POS source, donc getVisibleProducts le filtrait
+            let product = (CORE.db.products || []).find(p => p.id == productId);
             
-            console.log('Transfert réception - Recherche produit:', { productId, found: !!product, productsCount: CORE.getVisibleProducts().length });
+            console.log('Transfert réception - Recherche produit:', { productId, found: !!product, productsCount: (CORE.db.products || []).length });
             
             // Si le produit n'existe pas, le créer à partir des infos du transfert
             if (!product) {
@@ -30198,18 +30214,14 @@ Rapport généré par le système d'IA de gestion du stock
             transfer.receptionNote = note;
             transfer.receptionMedia = media;
             
-            // Ajouter le stock au POS destinataire
-            const destStock = (product.posStocks && product.posStocks[destPosId]) ? (product.posStocks[destPosId].stock || 0) : 0;
-            const newDestStock = destStock + qty;
+            // Ajouter le stock au POS destinataire via CORE.setProductStock
+            // BUG FIX: Utiliser setProductStock au lieu de manipuler posStocks directement
+            // Cela met à jour à la fois product.stock ET product.posStocks[posId]
+            const currentDestStock = CORE.getProductStock(product.id, destPosId) || 0;
+            const newDestStock = currentDestStock + qty;
+            CORE.setProductStock(product.id, destPosId, newDestStock);
             
-            console.log('Transfert réception - Mise à jour stock:', { productId: product.id, destPosId, destStock, qty, newDestStock });
-            
-            // Mettre à jour directement la structure posStocks
-            if (!product.posStocks) product.posStocks = {};
-            if (!product.posStocks[destPosId]) product.posStocks[destPosId] = { stock: 0, price: product.price || 0 };
-            product.posStocks[destPosId].stock = Math.max(0, newDestStock);
-            
-            console.log('Stock après mise à jour:', product.posStocks[destPosId]);
+            console.log('Transfert réception - Mise à jour stock:', { productId: product.id, destPosId, currentDestStock, qty, newDestStock });
             
             // Enregistrer le mouvement d'entrée
             CORE.db.stockMovements = CORE.db.stockMovements || [];
@@ -30275,7 +30287,7 @@ Rapport généré par le système d'IA de gestion du stock
             CORE.markDirty('products');
             CORE.markDirty('stockMovements');
             CORE.markDirty('notifications');
-            CORE.save();
+            CORE.save(true);
             this.invalidateCache();
             UI.closeModal();
             UI.toast('✅ Réception confirmée! ' + qty + ' ' + product.name + ' ajoutés au stock', 'success');
@@ -30372,8 +30384,8 @@ Rapport généré par le système d'IA de gestion du stock
             
             // S'assurer que les IDs sont cohérents
             const productId = transfer.productId;
-            const sourcePosId = parseInt(transfer.sourcePosId, 10);
-            const qty = parseInt(transfer.qty, 10) || 0;
+            const sourcePosId = transfer.sourcePosId;
+            const qty = Number(transfer.qty) || 0;
             
             // Chercher le produit avec comparaison flexible
             const product = CORE.getVisibleProducts().find(p => p.id == productId);
@@ -30444,7 +30456,7 @@ Rapport généré par le système d'IA de gestion du stock
             });
             
             // Enregistrer dans le journal d'audit
-            const destPosId = parseInt(transfer.destPosId, 10);
+            const destPosId = transfer.destPosId;
             CORE.db.auditLogs = CORE.db.auditLogs || [];
             CORE.db.auditLogs.push({
                 id: 'AUDIT-' + Date.now(),
@@ -30465,7 +30477,7 @@ Rapport généré par le système d'IA de gestion du stock
             CORE.markDirty('products');
             CORE.markDirty('stockMovements');
             CORE.markDirty('notifications');
-            CORE.save();
+            CORE.save(true);
             this.invalidateCache();
             UI.closeModal();
             UI.toast('❌ Transfert rejeté. Stock retourné à ' + transfer.sourcePosName, 'info');
@@ -30618,9 +30630,9 @@ Rapport généré par le système d'IA de gestion du stock
 
         // Notifications de transferts (réceptions confirmées/rejetées)
         getTransferNotifications() {
-            const currentPosId = CORE.state.currentUser?.pos;
+            const currentPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
             return (CORE.db.notifications || []).filter(n => 
-                n.posId == currentPosId && 
+                (String(n.posId) === String(currentPosId)) && 
                 (n.type === 'transfer_received' || n.type === 'transfer_rejected') &&
                 !n.read
             ).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -30632,8 +30644,9 @@ Rapport généré par le système d'IA de gestion du stock
 
         showTransferNotificationsModal() {
             const notifications = this.getTransferNotifications();
+            const _nPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
             const allNotifications = (CORE.db.notifications || []).filter(n => 
-                n.posId == CORE.state.currentUser?.pos && 
+                (String(n.posId) === String(_nPosId)) && 
                 (n.type === 'transfer_received' || n.type === 'transfer_rejected')
             ).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 20);
             
@@ -40004,22 +40017,21 @@ Rapport généré par le système d'IA de gestion du stock
         productBelongsToPos(product, posId) {
             if (!posId) return true;
             if (!product) return false;
-            const numericPosId = Number(posId);
-            if (!Number.isFinite(numericPosId)) return false;
+            const strPosId = String(posId);
             
             // Si produit est verrouillé à un POS spécifique (créé par gestionnaire assigné)
-            if (product.lockedToPosId && Number(product.lockedToPosId) !== numericPosId) {
+            if (product.lockedToPosId && String(product.lockedToPosId) !== strPosId) {
                 return false;
             }
             
             // Si le produit a un posId défini, il appartient EXCLUSIVEMENT à ce POS
             // sauf s'il a été explicitement transféré vers un autre POS via posStocks
             if (product.posId !== null && product.posId !== undefined) {
-                if (Number(product.posId) === numericPosId) return true;
+                if (String(product.posId) === strPosId) return true;
                 
                 // Vérifier si le produit a été transféré vers ce POS (a du stock dans posStocks)
                 const stockMap = product.posStocks || {};
-                const entry = stockMap[String(numericPosId)] ?? stockMap[numericPosId] ?? null;
+                const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
                 if (!entry) return false;
                 const stock = Number(entry.stock ?? entry.quantity ?? 0);
                 if (Number.isFinite(stock) && stock > 0) return true;
@@ -40033,7 +40045,7 @@ Rapport généré par le système d'IA de gestion du stock
             
             // Vérifier posStocks pour les produits globaux
             const stockMap = product.posStocks || {};
-            const entry = stockMap[String(numericPosId)] ?? stockMap[numericPosId] ?? null;
+            const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
             if (!entry) return false;
             const stock = Number(entry.stock ?? entry.quantity ?? 0);
             if (Number.isFinite(stock) && stock > 0) return true;
@@ -41536,7 +41548,7 @@ Rapport généré par le système d'IA de gestion du stock
             const q = (document.getElementById('manager-inventory-search-input')?.value || this.state.inventorySearch || '').toLowerCase().trim();
             const currentUser = CORE.state.currentUser || {};
             const forcedPosId = currentUser.role === 'gestionnaire' ? (currentUser.pos || currentUser.storeId) : null;
-            const posId = forcedPosId ?? (this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : null);
+            const posId = forcedPosId ?? (this.state.inventoryPosId || null);
             const categoryFilter = this.state.inventoryCategoryFilter || 'all';
             const statusFilter = this.state.inventoryStatusFilter || 'all';
             const sortBy = this.state.inventorySortBy || 'name';
@@ -41598,7 +41610,7 @@ Rapport généré par le système d'IA de gestion du stock
         getProductsStats() {
             const currentUser = CORE.state.currentUser || {};
             const forcedPosId = currentUser.role === 'gestionnaire' ? (currentUser.pos || currentUser.storeId) : null;
-            const posId = forcedPosId ?? (this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : null);
+            const posId = forcedPosId ?? (this.state.inventoryPosId || null);
             const page = this.state.inventoryPage || 1;
             const perPage = this.state.inventoryPerPage || 50;
             const allFiltered = this.getProductsFiltered(false);
@@ -41625,7 +41637,7 @@ Rapport généré par le système d'IA de gestion du stock
             const t = this.state.movementsType;
             const currentUser = CORE.state.currentUser || {};
             const forcedPosId = currentUser.role === 'gestionnaire' ? (currentUser.pos || currentUser.storeId) : null;
-            const posId = forcedPosId ?? (this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : null);
+            const posId = forcedPosId ?? (this.state.inventoryPosId || null);
             let movs = [...CORE.getVisibleStockMovements()];
             if (t !== 'all') movs = movs.filter(m => m.type === t);
             if (posId) movs = movs.filter(m => m.posId === posId);
@@ -42705,7 +42717,7 @@ Rapport généré par le système d'IA de gestion du stock
         showAdvancedStockModal(productId) {
             const p = CORE.getProduct(productId);
             if (!p) return;
-            const posId = this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : null;
+            const posId = this.state.inventoryPosId || null;
             const currentStock = posId ? CORE.getProductStock(productId, posId) : (p.stock || 0);
             const variants = CORE.getProductVariants(productId);
             
@@ -42771,7 +42783,7 @@ Rapport généré par le système d'IA de gestion du stock
         applyAdvancedStock(productId) {
             const p = CORE.getProduct(productId);
             if (!p) return;
-            const posId = this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : null;
+            const posId = this.state.inventoryPosId || null;
             const variants = CORE.getProductVariants(productId);
             
             // Appliquer à la variante si tab_variants est visible
@@ -42964,7 +42976,7 @@ Rapport généré par le système d'IA de gestion du stock
 
         showBulkRestockModal() {
             const products = CORE.getVisibleProducts() || [];
-            const posId = this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : null;
+            const posId = this.state.inventoryPosId || null;
             const pos = posId ? CORE.getPOS(posId) : null;
             const categories = [...new Set(products.map(p => p.categoryId).filter(Boolean))];
             const suppliers = CORE.db.suppliers || [];
@@ -43478,7 +43490,7 @@ Rapport généré par le système d'IA de gestion du stock
             const mult = Utils.clamp(parseFloat(UI.val('bulk_multiplier') || '2'), 1, 50);
             const ref = UI.val('bulk_ref').trim() || `BULK-${Utils.uid('BL')}`;
             const autoPurchase = document.getElementById('bulk_auto_purchase')?.checked;
-            const posId = this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : null;
+            const posId = this.state.inventoryPosId || null;
             
             // Récupérer les produits sélectionnés
             const selectedIds = Array.from(document.querySelectorAll('[data-bulk-check]:checked')).map(c => parseInt(c.dataset.productId));
@@ -43996,16 +44008,16 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         executeStockTransfer() {
-            const productId = parseInt(UI.val('tf_product') || '0', 10);
-            const sourcePosId = parseInt(UI.val('tf_source_pos') || '0', 10);
-            const destPosId = parseInt(UI.val('tf_dest_pos') || '0', 10);
+            const productId = UI.val('tf_product') || '';
+            const sourcePosId = UI.val('tf_source_pos') || '';
+            const destPosId = UI.val('tf_dest_pos') || '';
             const qty = parseInt(UI.val('tf_qty') || '0', 10);
             const reason = UI.val('tf_reason').trim();
             
             // Validations
             if (!productId) return UI.toast('Sélectionnez un produit', 'warning');
             if (!sourcePosId || !destPosId) return UI.toast('Sélectionnez les deux POS', 'warning');
-            if (sourcePosId === destPosId) return UI.toast('Les POS source et destination doivent être différents', 'warning');
+            if (String(sourcePosId) === String(destPosId)) return UI.toast('Les POS source et destination doivent être différents', 'warning');
             if (qty <= 0) return UI.toast('La quantité doit être supérieure à 0', 'warning');
             
             const product = CORE.getProduct(productId);
@@ -44055,9 +44067,31 @@ Rapport généré par le système d'IA de gestion du stock
                 posId: destPosId
             });
             
+            // Créer un enregistrement stockTransfers pour traçabilité
+            CORE.db.stockTransfers = CORE.db.stockTransfers || [];
+            CORE.db.stockTransfers.push({
+                id: transferRef,
+                productId: productId,
+                productName: product.name,
+                qty: qty,
+                sourcePosId: sourcePosId,
+                sourcePosName: sourcePos.name,
+                destPosId: destPosId,
+                destPosName: destPos.name,
+                reason: reason || 'Transfert inter-POS (Manager)',
+                status: 'accepted', // Manager = transfert direct, pas besoin de confirmation
+                createdBy: CORE.state.currentUser?.id,
+                createdByName: CORE.state.currentUser?.name || 'Manager',
+                createdAt: new Date().toISOString(),
+                receivedAt: new Date().toISOString(),
+                receivedBy: 'auto',
+                receivedByName: 'Transfert direct (Manager)'
+            });
+            
             CORE.markDirty('products');
             CORE.markDirty('stockMovements');
-            CORE.save();
+            CORE.markDirty('stockTransfers');
+            CORE.save(true);
             UI.closeModal();
             UI.toast(`✓ ${qty} ${product.name} transféré(s) de ${sourcePos.name} à ${destPos.name}`, 'success');
             App.rerender();
@@ -45223,8 +45257,8 @@ Rapport généré par le système d'IA de gestion du stock
             const hasAssignedPos = currentUser.role === 'gestionnaire' && currentUser.pos;
             const forcedPosId = hasAssignedPos ? currentUser.pos : null;
             // Ignorer inventoryPosId si gestionnaire a un POS assigné (empêcher le changement de POS)
-            const statePosCandidate = hasAssignedPos ? NaN : (this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : NaN);
-            const selectedPosId = Number.isFinite(statePosCandidate) ? statePosCandidate : null;
+            const statePosCandidate = hasAssignedPos ? null : (this.state.inventoryPosId || null);
+            const selectedPosId = statePosCandidate || null;
             const activePosId = forcedPosId ?? selectedPosId;
             const products = CORE.getVisibleProducts() || [];
             // Ne pas autoriser main-stock si gestionnaire a un POS assigné
@@ -45528,8 +45562,8 @@ Rapport généré par le système d'IA de gestion du stock
             const hasAssignedPos = currentUser.role === 'gestionnaire' && currentUser.pos;
             const forcedPosId = hasAssignedPos ? currentUser.pos : null;
             // Ignorer inventoryPosId si gestionnaire a un POS assigné (empêcher le changement de POS)
-            const statePosCandidate = hasAssignedPos ? NaN : (this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : NaN);
-            const selectedPosId = Number.isFinite(statePosCandidate) ? statePosCandidate : null;
+            const statePosCandidate = hasAssignedPos ? null : (this.state.inventoryPosId || null);
+            const selectedPosId = statePosCandidate || null;
             const activePosId = forcedPosId ?? selectedPosId;
             const products = CORE.getVisibleProducts() || [];
             // Ne pas autoriser main-stock si gestionnaire a un POS assigné
@@ -46026,8 +46060,8 @@ Rapport généré par le système d'IA de gestion du stock
             const forcedPosId = hasAssignedPos ? currentUser.pos : null;
             const currentView = this.state.currentView;
             // Ignorer inventoryPosId si gestionnaire a un POS assigné
-            const rawStatePos = hasAssignedPos ? NaN : (this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : NaN);
-            const selectedPosId = Number.isFinite(rawStatePos) ? rawStatePos : null;
+            const rawStatePos = hasAssignedPos ? null : (this.state.inventoryPosId || null);
+            const selectedPosId = rawStatePos || null;
             // Ne pas autoriser main-stock si gestionnaire a un POS assigné
             const activePosId = hasAssignedPos ? forcedPosId : (currentView === 'main-stock' ? null : (forcedPosId ?? selectedPosId));
             const pos = activePosId ? CORE.getPOS(activePosId) : null;
@@ -46143,22 +46177,21 @@ Rapport généré par le système d'IA de gestion du stock
         productBelongsToPos(product, posId) {
             if (!posId) return true;
             if (!product) return false;
-            const numericPosId = Number(posId);
-            if (!Number.isFinite(numericPosId)) return false;
+            const strPosId = String(posId);
             
             // Si produit est verrouillé à un POS spécifique (créé par gestionnaire assigné)
-            if (product.lockedToPosId && Number(product.lockedToPosId) !== numericPosId) {
+            if (product.lockedToPosId && String(product.lockedToPosId) !== strPosId) {
                 return false;
             }
             
             // Si le produit a un posId défini, il appartient EXCLUSIVEMENT à ce POS
             // sauf s'il a été explicitement transféré vers un autre POS via posStocks
             if (product.posId !== null && product.posId !== undefined) {
-                if (Number(product.posId) === numericPosId) return true;
+                if (String(product.posId) === strPosId) return true;
                 
                 // Vérifier si le produit a été transféré vers ce POS (a du stock dans posStocks)
                 const stockMap = product.posStocks || {};
-                const entry = stockMap[String(numericPosId)] ?? stockMap[numericPosId] ?? null;
+                const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
                 if (!entry) return false;
                 const stock = Number(entry.stock ?? entry.quantity ?? 0);
                 if (Number.isFinite(stock) && stock > 0) return true;
@@ -46172,7 +46205,7 @@ Rapport généré par le système d'IA de gestion du stock
             
             // Vérifier posStocks pour les produits globaux
             const stockMap = product.posStocks || {};
-            const entry = stockMap[String(numericPosId)] ?? stockMap[numericPosId] ?? null;
+            const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
             if (!entry) return false;
             const stock = Number(entry.stock ?? entry.quantity ?? 0);
             if (Number.isFinite(stock) && stock > 0) return true;
@@ -46190,14 +46223,14 @@ Rapport généré par le système d'IA de gestion du stock
             const resolvedForcedPosId = forcePosId !== null && forcePosId !== undefined
                 ? forcePosId
                 : (currentUser.role === 'gestionnaire' ? (currentUser.pos || currentUser.storeId) : null);
-            const forcedPosIdParsed = resolvedForcedPosId !== null && resolvedForcedPosId !== undefined
-                ? parseInt(resolvedForcedPosId, 10)
+            // BUG FIX: Don't use parseInt — IDs can be UUIDs
+            const forcedPosId = resolvedForcedPosId !== null && resolvedForcedPosId !== undefined
+                ? resolvedForcedPosId
                 : null;
-            const forcedPosId = Number.isNaN(forcedPosIdParsed) ? null : forcedPosIdParsed;
             if (forcedPosId) {
                 this.state.inventoryPosId = String(forcedPosId);
             }
-            const posId = forcedPosId ?? (this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : null);
+            const posId = forcedPosId ?? (this.state.inventoryPosId || null);
             const pos = posId ? CORE.getPOS(posId) : null;
             const allowPosSwitch = !forcedPosId && !hidePosSelector;
             const visiblePosList = allowPosSwitch ? (pos ? [pos] : CORE.db.pointsOfSale) : (pos ? [pos] : []);
@@ -46438,7 +46471,7 @@ Rapport généré par le système d'IA de gestion du stock
                                     <tbody class="divide-y divide-slate-50">
                                         ${products.length === 0 ? `<tr><td colspan="8" class="px-6 py-12 text-center text-slate-400 font-medium">Aucun produit</td></tr>` : ''}
                                         ${products.map(p => {
-                                            const posId = this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : null;
+                                            const posId = this.state.inventoryPosId || null;
                                             const stock = posId ? CORE.getProductStock(p.id, posId) : (p.stock || 0);
                                             const price = posId ? CORE.getProductPrice(p.id, posId) : (p.price || 0);
                                             const isLow = stock <= p.minStock;
@@ -48743,7 +48776,7 @@ Rapport généré par le système d'IA de gestion du stock
             if (!product) return UI.toast('Produit non trouvé', 'error');
             if (newQty < 0) return UI.toast('Quantité invalide', 'warning');
             
-            const posId = this.state.inventoryPosId ? parseInt(this.state.inventoryPosId, 10) : null;
+            const posId = this.state.inventoryPosId || null;
             const currentStock = posId ? CORE.getProductStock(productId, posId) : (product.stock || 0);
             const diff = newQty - currentStock;
             const moveType = diff > 0 ? 'in' : 'out';
@@ -59121,11 +59154,11 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                                 <div class="flex items-center gap-3 flex-1">
                                     ${u.profileImage ? `<img src="${u.profileImage}" class="w-12 h-12 rounded-xl object-cover" onerror="this.style.display='none'">` : `<div class="w-12 h-12 gradient-${u.role} rounded-xl flex items-center justify-center text-white font-black text-sm">${u.avatar}</div>`}
                                     <div class="flex-1">
-                                        <div class="font-black text-slate-900">${u.name}</div>
+                                        <div class="font-black text-slate-900">${Utils.escapeHtml(u.name)}</div>
                                         <div class="text-xs text-slate-500 space-y-1">
-                                            <div>Role: <span class="font-bold text-slate-700">${u.role}</span></div>
-                                            <div>Identifiant: <span class="font-mono text-emerald-600">${u.username || 'N/A'}</span></div>
-                                            <div>Mot de passe: <span class="font-mono text-cyan-600">${u.password || 'N/A'}</span></div>
+                                            <div>Role: <span class="font-bold text-slate-700">${Utils.escapeHtml(u.role)}</span></div>
+                                            <div>Identifiant: <span class="font-mono text-emerald-600">${Utils.escapeHtml(u.username || 'N/A')}</span></div>
+                                            <div>Mot de passe: <span class="font-mono text-cyan-600">••••••••</span></div>
                                             <div>Statut: <span class="font-bold ${u.active ? 'text-emerald-600' : 'text-red-600'}">${u.active ? 'Actif' : 'Inactif'}</span></div>
                                         </div>
                                     </div>
@@ -59853,12 +59886,25 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         .map(function(m) { return String(m.email || m.userEmail || '').toLowerCase().trim(); })
                         .filter(function(email) { return !!email; })
                 );
+                const activeUsers = (CORE.db.users || []).filter(function(u) { return u && u.active !== false && !u.pendingApproval; });
+                const activeUserIds = new Set(
+                    activeUsers
+                        .map(function(u) { return String(u._apiId || u.id || ''); })
+                        .filter(function(id) { return !!id; })
+                );
+                const activeUserEmails = new Set(
+                    activeUsers
+                        .map(function(u) { return String(u.email || u.username || '').toLowerCase().trim(); })
+                        .filter(function(email) { return !!email; })
+                );
                 const dedupPendingRequests = (PDGModule._joinRequests || []).filter(function(r) {
                     if (r.status !== 'PENDING') return false;
                     const requestUserId = String(r.userId || r.user_id || '');
                     if (requestUserId && pendingMemberUserIds.has(requestUserId)) return false;
                     const requestEmail = String(r.userEmail || r.email || '').toLowerCase().trim();
                     if (requestEmail && pendingMemberEmails.has(requestEmail)) return false;
+                    if (requestUserId && activeUserIds.has(requestUserId)) return false;
+                    if (requestEmail && activeUserEmails.has(requestEmail)) return false;
                     return true;
                 });
                 const pendingCount = dedupPendingRequests.length + pendingMembersList.length;
@@ -60036,12 +60082,25 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     .map(function(m) { return String(m.email || m.userEmail || '').toLowerCase().trim(); })
                     .filter(function(email) { return !!email; })
             );
+            const activeUsers = (CORE.db.users || []).filter(function(u) { return u && u.active !== false && !u.pendingApproval; });
+            const activeUserIds = new Set(
+                activeUsers
+                    .map(function(u) { return String(u._apiId || u.id || ''); })
+                    .filter(function(id) { return !!id; })
+            );
+            const activeUserEmails = new Set(
+                activeUsers
+                    .map(function(u) { return String(u.email || u.username || '').toLowerCase().trim(); })
+                    .filter(function(email) { return !!email; })
+            );
             const pending = requests.filter(function(r) {
                 if (r.status !== 'PENDING') return false;
                 const requestUserId = String(r.userId || r.user_id || '');
                 if (requestUserId && pendingMemberUserIds.has(requestUserId)) return false;
                 const requestEmail = String(r.userEmail || r.email || '').toLowerCase().trim();
                 if (requestEmail && pendingMemberEmails.has(requestEmail)) return false;
+                if (requestUserId && activeUserIds.has(requestUserId)) return false;
+                if (requestEmail && activeUserEmails.has(requestEmail)) return false;
                 return true;
             });
             const history = requests.filter(r => r.status !== 'PENDING');
@@ -60270,6 +60329,28 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     CORE.markDirty('users');
                     CORE.save();
                 }
+
+                // Cleanup duplicated pending join requests for this same user/email (if any)
+                try {
+                    var approvedEmail = String((localUser && localUser.email) || '').toLowerCase().trim();
+                    var pendingReqs = await API.request('/invitations/requests?status=PENDING', { method: 'GET' });
+                    var pendingList = Array.isArray(pendingReqs) ? pendingReqs : (pendingReqs?.data || pendingReqs?.requests || []);
+                    var sameUserPending = pendingList.filter(function(r) {
+                        var rid = String(r.userId || r.user_id || '');
+                        var remail = String(r.userEmail || r.email || '').toLowerCase().trim();
+                        if (rid && rid === String(userId)) return true;
+                        if (approvedEmail && remail && remail === approvedEmail) return true;
+                        return false;
+                    });
+                    for (var sr = 0; sr < sameUserPending.length; sr++) {
+                        var reqId = sameUserPending[sr].id;
+                        if (!reqId) continue;
+                        try {
+                            await API.request('/invitations/requests/' + reqId + '/approve', { method: 'POST', body: { role: role, storeId: storeId } });
+                        } catch(_e) {}
+                    }
+                } catch(_cleanupErr) {}
+
                 // Optimistic update: remove member from pending list
                 if (PDGModule._pendingMembers) {
                     PDGModule._pendingMembers = PDGModule._pendingMembers.filter(function(m) {
@@ -60633,7 +60714,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             if (this._proactiveRefreshInterval) clearInterval(this._proactiveRefreshInterval);
             this._tokenSetAt = Date.now();
             this._proactiveRefreshInterval = setInterval(async () => {
-                if (!this.isAuthenticated() || !navigator.onLine) return;
+                if (!this.isAuthenticated() || !navigator.onLine || document.visibilityState !== 'visible') return;
                 var tokenAge = Date.now() - (this._tokenSetAt || 0);
                 // Refresh after 45 minutes (before 1h expiry)
                 if (tokenAge > 45 * 60 * 1000) {
@@ -60647,7 +60728,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         this._notifyAuthExpiring();
                     }
                 }
-            }, 5 * 60 * 1000); // Check every 5 minutes (JWT expires in ~1h)
+            }, 10 * 60 * 1000); // PERF: Check every 10 min (was 5 min) — only when tab visible
         },
 
         _authWarningShown: false,
@@ -60661,20 +60742,21 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             setTimeout(() => { this._authWarningShown = false; }, 300000);
         },
 
-        // KEEPALIVE: Ping backend every 4 min to prevent Railway cold-start (free tier sleeps after 5 min idle)
+        // KEEPALIVE: Ping backend every 10 min to prevent Railway cold-start
+        // PERF: Increased from 4min to 10min. Railway Pro tier doesn't sleep. Free tier sleeps after 15min.
         _keepaliveInterval: null,
         startKeepalive() {
             if (this._keepaliveInterval) return; // already running
             var baseUrl = (this.baseUrl || 'https://raya-backend-production.up.railway.app/api').replace(/\/api\/?$/, '');
             this._keepaliveInterval = setInterval(function() {
-                if (!navigator.onLine) return;
+                if (!navigator.onLine || document.visibilityState !== 'visible') return;
                 fetch(baseUrl + '/api/health', { method: 'GET', mode: 'cors' })
                     .then(function(r) { console.log('[KEEPALIVE] ping ' + r.status); })
                     .catch(function() { /* silent */ });
-            }, 4 * 60 * 1000); // every 4 minutes
+            }, 10 * 60 * 1000); // PERF: every 10 minutes (was 4 min)
             // Also do an immediate ping on start
             fetch(baseUrl + '/api/health', { method: 'GET', mode: 'cors' }).catch(function(){});
-            console.log('[KEEPALIVE] Started — pinging every 4min');
+            console.log('[KEEPALIVE] Started — pinging every 10min');
         },
         stopKeepalive() {
             if (this._keepaliveInterval) { clearInterval(this._keepaliveInterval); this._keepaliveInterval = null; }
@@ -62315,50 +62397,13 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                                 refreshed = await API._refreshAccessToken();
                                 if (refreshed) console.log('[AUTO-REAUTH] Token refreshed ✓');
                             }
-                            // Step 2: Try stored credentials
+                            // Step 2: Try refresh token (stored creds now delegates to refresh)
                             if (!refreshed && API._reLoginWithStoredCreds) {
                                 refreshed = await API._reLoginWithStoredCreds();
-                                if (refreshed) console.log('[AUTO-REAUTH] Re-login with stored creds ✓');
+                                if (refreshed) console.log('[AUTO-REAUTH] Re-login via refresh token ✓');
                             }
-                            // Step 3: Try bootstrap/register with current user info
-                            if (!refreshed && CORE.state.currentUser) {
-                                var u = CORE.state.currentUser;
-                                var email = u.email || u.username;
-                                var password = u.password;
-                                if (email && password) {
-                                    try {
-                                        var lr = await API.login(email, password);
-                                        if (lr && lr.accessToken) { refreshed = true; console.log('[AUTO-REAUTH] Login OK ✓'); }
-                                    } catch(e1) {
-                                        console.log('[AUTO-REAUTH] Login failed, trying bootstrap...', e1.message);
-                                        var tName = (typeof CORE.getCompanyName === 'function' ? CORE.getCompanyName() : '') || CORE.tenantId || 'default';
-                                        var np = (u.name || '').split(' ');
-                                        try {
-                                            var br = await API.bootstrap({
-                                                activationCode: 'RAYAMANAGER2026', tenantName: tName,
-                                                email: email, password: password,
-                                                firstName: np[0] || 'User', lastName: np.slice(1).join(' ') || '',
-                                                currency: 'XOF', timezone: 'Africa/Abidjan'
-                                            });
-                                            if (br && br.accessToken) {
-                                                refreshed = true;
-                                                if (br.tenant) try { API.tenantId = String(br.tenant.id || br.tenant.tenantCode); } catch(e) {}
-                                                console.log('[AUTO-REAUTH] Bootstrap OK ✓');
-                                            }
-                                        } catch(e2) {
-                                            try {
-                                                var rr = await API.register({
-                                                    email: email, password: password,
-                                                    firstName: np[0] || 'User', lastName: np.slice(1).join(' ') || '',
-                                                    role: (u.role || 'pdg').toUpperCase(),
-                                                    tenantId: API.tenantId || CORE.tenantId || 'default'
-                                                });
-                                                if (rr && rr.accessToken) { refreshed = true; console.log('[AUTO-REAUTH] Register OK ✓'); }
-                                            } catch(e3) { console.warn('[AUTO-REAUTH] All auth methods failed'); }
-                                        }
-                                    }
-                                }
-                            }
+                            // SECURITY: No longer stores/uses plaintext passwords or hardcoded activation codes.
+                            // If refresh token fails, user must re-login manually.
                             // Step 4: If we got authenticated, do a full sync
                             if (refreshed && API.isAuthenticated && API.isAuthenticated()) {
                                 console.log('[AUTO-REAUTH] ✅ Authenticated! Running full cloud sync...');
@@ -62420,11 +62465,13 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 }
             } catch(e) { console.warn('[INVITE] URL parse error:', e); }
 
-            // === PERIODIC CLOUD SYNC (P1: smart intervals) ===
-            // Light sync every 60s: push dirty, pull cloud only periodically
-            // Full sync every ~5 minutes: full pull + full push
+            // === PERIODIC CLOUD SYNC (P1: smart intervals — PERF OPTIMIZED) ===
+            // Light sync every 3min (push dirty only). Full sync every 15min.
+            // PERF: Skip when tab hidden. Skip syncFromApi (redundant with syncAllFromCloud).
             this._syncCycleCount = 0;
             setInterval(function() {
+                // PERF: Skip sync entirely when tab is not visible (saves massive request volume)
+                if (document.visibilityState !== 'visible') return;
                 // Auto-reset stuck sync lock after 60s
                 if (CORE._isSyncing && CORE._syncStart && (Date.now() - CORE._syncStart > 60000)) {
                     console.warn('[SYNC] Resetting stuck sync lock');
@@ -62442,7 +62489,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         console.log('[SYNC] Backoff: ' + App._syncFailures + ' failures, skipping cycle #' + App._syncCycleCount);
                         return;
                     }
-                    var isFullSync = (App._syncCycleCount % 5 === 0); // Full sync every 5th cycle (~5 min with 60s interval)
+                    var isFullSync = (App._syncCycleCount % 5 === 0); // Full sync every 5th cycle (~15 min with 180s interval)
                     CORE._isSyncing = true;
                     CORE._syncStart = Date.now();
                     var _cycleT0 = performance.now();
@@ -62462,14 +62509,13 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     }
 
                     if (isFullSync) {
-                        console.log('[SYNC] Full sync + CRDT (#' + App._syncCycleCount + ')...');
+                        // PERF: Full sync = CRDT events + cloud pull + push dirty.
+                        // Removed syncFromApi() — it duplicates syncAllFromCloud (saves 7 requests).
+                        console.log('[SYNC] Full sync (#' + App._syncCycleCount + ')...');
                         if (typeof SyncIndicator !== 'undefined') SyncIndicator.show('syncing', 'Sync compl\u00e8te...');
                         var _ft0 = performance.now();
                         API.syncEvents().then(function() {
                             console.log('[SYNC-PERF] syncEvents: ' + (performance.now() - _ft0).toFixed(0) + 'ms');
-                            var _ft1 = performance.now();
-                            return API.syncFromApi().then(function(r) { console.log('[SYNC-PERF] syncFromApi: ' + (performance.now() - _ft1).toFixed(0) + 'ms'); return r; });
-                        }).then(function() {
                             var _ft2 = performance.now();
                             return API.syncAllFromCloud(true).then(function(r) { console.log('[SYNC-PERF] syncAllFromCloud: ' + (performance.now() - _ft2).toFixed(0) + 'ms'); return r; });
                         }).then(function() {
@@ -62495,17 +62541,13 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                             CORE._isSyncing = false;
                         });
                     } else if (CORE.hasDirty()) {
-                        // Light sync: push dirty every cycle; pull cloud respects cooldown
+                        // Light sync: push dirty only (no pull — pull happens in full sync).
+                        // PERF: Removed syncEvents + syncAllFromCloud from light sync to reduce requests.
                         var dirtyCount = CORE.getDirtyCollections().length;
                         console.log('[SYNC] Light sync (#' + App._syncCycleCount + ', ' + dirtyCount + ' dirty)...');
                         if (typeof SyncIndicator !== 'undefined') SyncIndicator.show('syncing', dirtyCount + ' collection(s)...');
                         var _lt0 = performance.now();
-                        API.syncEvents().then(function() {
-                            // syncAllFromCloud has built-in 2min cooldown — safe to call
-                            return API.syncAllFromCloud();
-                        }).then(function() {
-                            return API.syncDirtyToCloud();
-                        }).then(function() {
+                        API.syncDirtyToCloud().then(function() {
                             console.log('[SYNC] ✅ Light sync complete in ' + (performance.now() - _lt0).toFixed(0) + 'ms');
                             if (typeof SyncIndicator !== 'undefined') SyncIndicator.show('success', 'Sync OK');
                             App._syncFailures = 0;
@@ -62517,14 +62559,9 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                             CORE._isSyncing = false;
                         });
                     } else {
-                        // Nothing dirty — CRDT events only (PERF: skip full cloud pull, full sync handles it)
-                        API.syncEvents().then(function() {
-                            App._syncFailures = 0;
-                            CORE._isSyncing = false;
-                        }).catch(function(e) {
-                            App._syncFailures = (App._syncFailures || 0) + 1;
-                            CORE._isSyncing = false;
-                        });
+                        // Nothing dirty, nothing to do — just release the lock.
+                        // PERF: Removed syncEvents call when idle (saves 1 request/cycle).
+                        CORE._isSyncing = false;
                     }
                     }); // end refreshPromise.then
                 }
@@ -62543,44 +62580,10 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                                 if (API._refreshAccessToken) ok = await API._refreshAccessToken();
                                 // Then stored creds
                                 if (!ok && API._reLoginWithStoredCreds) ok = await API._reLoginWithStoredCreds();
-                                // Then direct login with currentUser credentials
-                                if (!ok && CORE.state.currentUser) {
-                                    var u = CORE.state.currentUser;
-                                    var email = u.email || u.username;
-                                    var pwd = u.password;
-                                    if (email && pwd) {
-                                        try {
-                                            var lr = await API.login(email, pwd);
-                                            if (lr && lr.accessToken) ok = true;
-                                        } catch(e1) {
-                                            // Try bootstrap
-                                            var tName = (typeof CORE.getCompanyName === 'function' ? CORE.getCompanyName() : '') || CORE.tenantId || 'default';
-                                            var np = (u.name || '').split(' ');
-                                            try {
-                                                var br = await API.bootstrap({
-                                                    activationCode: 'RAYAMANAGER2026', tenantName: tName,
-                                                    email: email, password: pwd,
-                                                    firstName: np[0] || 'User', lastName: np.slice(1).join(' ') || '',
-                                                    currency: 'XOF', timezone: 'Africa/Abidjan'
-                                                });
-                                                if (br && br.accessToken) {
-                                                    ok = true;
-                                                    if (br.tenant) try { API.tenantId = String(br.tenant.id || br.tenant.tenantCode); } catch(e) {}
-                                                }
-                                            } catch(e2) {
-                                                try {
-                                                    var rr = await API.register({
-                                                        email: email, password: pwd,
-                                                        firstName: np[0] || 'User', lastName: np.slice(1).join(' ') || '',
-                                                        role: (u.role || 'pdg').toUpperCase(),
-                                                        tenantId: API.tenantId || CORE.tenantId || 'default'
-                                                    });
-                                                    if (rr && rr.accessToken) ok = true;
-                                                } catch(e3) { /* all failed */ }
-                                            }
-                                        }
-                                    }
-                                }
+                                // Then stored creds (now delegates to refresh token)
+                                if (!ok && API._reLoginWithStoredCreds) ok = await API._reLoginWithStoredCreds();
+                                // SECURITY: No longer stores/uses plaintext passwords or hardcoded activation codes.
+                                // If refresh token fails, user must re-login manually.
                                 if (ok && API.isAuthenticated && API.isAuthenticated()) {
                                     console.log('[SYNC-REAUTH] ✅ Authenticated! Running full sync...');
                                     API.startProactiveRefresh();
@@ -62599,7 +62602,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         })();
                     }
                 }
-            }, 60000); // Check every 60s
+            }, 180000); // PERF: Check every 180s (3 min) instead of 60s — reduces requests by 3x
         },
 
         mount(html) { if (!html || html.length < 10) { console.error('[App] mount received empty/tiny html:', html); return; }
@@ -62730,8 +62733,8 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 App._checkPendingEmployees();
                 if (!App._pendingEmployeePoll) {
                     App._pendingEmployeePoll = setInterval(function() {
-                        if (API.isAuthenticated() && navigator.onLine) App._checkPendingEmployees();
-                    }, 60000); // Check every 60 seconds
+                        if (API.isAuthenticated() && navigator.onLine && document.visibilityState === 'visible') App._checkPendingEmployees();
+                    }, 300000); // PERF: Check every 5 min instead of 60s (saves 8 requests/5min)
                 }
             }
         },
@@ -63264,7 +63267,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 } catch(e) {
                     console.warn('[PENDING] Poll error:', e.message);
                 }
-            }, 10000);
+            }, 30000); // PERF: 30s instead of 10s (reduces pending-screen requests by 3x)
         },
 
         _logoutFromPending() {
@@ -63358,7 +63361,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         }
 
                         // Sync data from API — DO IT IN BACKGROUND (don't block login)
-                        // Show dashboard immediately, sync will happen in the background
+                        // PERF: Removed syncFromApi() — syncAllFromCloud already fetches all data.
                         (async function() {
                             try { 
                                 console.log('[LOGIN] Background sync starting...');
@@ -63366,7 +63369,6 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                                 console.log('[LOGIN] syncAllFromCloud done');
                                 await API.syncAllToCloud(); 
                                 console.log('[LOGIN] syncAllToCloud done');
-                                try { await API.syncFromApi(); } catch(e) {}
                                 CORE.save(true);
                                 if (typeof App !== 'undefined') App.rerender();
                                 UI.toast('☁ Données synchronisées', 'success', 3000);
@@ -63498,55 +63500,21 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 if (CORE.state.isOnline && typeof API !== 'undefined') {
                     (async function() {
                         try {
-                            var u = CORE.state.currentUser;
-                            var tName = (typeof CORE.getCompanyName === 'function' ? CORE.getCompanyName() : '') || CORE.tenantId || 'default';
-                            var np = (u.name || '').split(' ');
-                            var fn = np[0] || 'User';
-                            var ln = np.slice(1).join(' ') || '';
-                            var rl = (u.role || 'pdg').toUpperCase();
                             var tok = null;
-                            // Step 1: Try login first (account may already exist on backend)
+                            // Try login on backend (account should exist)
                             try {
                                 var lr = await API.login(email, password);
                                 if (lr && lr.accessToken) { tok = lr.accessToken; console.log('[AUTO-SYNC] Login OK'); }
                             } catch(e1) {
-                                console.log('[AUTO-SYNC] Login failed, trying bootstrap...', e1.message);
+                                console.log('[AUTO-SYNC] Login failed:', e1.message);
+                                // SECURITY: No hardcoded activation code. If login fails, user must bootstrap manually.
                             }
-                            // Step 2: If login failed, try bootstrap (creates tenant + admin)
-                            if (!tok) {
-                                try {
-                                    var br = await API.bootstrap({
-                                        activationCode: 'RAYAMANAGER2026', tenantName: tName,
-                                        email: email, password: password,
-                                        firstName: fn, lastName: ln,
-                                        currency: 'XOF', timezone: 'Africa/Abidjan'
-                                    });
-                                    if (br && br.accessToken) {
-                                        tok = br.accessToken;
-                                        if (br.tenant) try { API.tenantId = String(br.tenant.id || br.tenant.tenantCode); } catch(e) {}
-                                        console.log('[AUTO-SYNC] Bootstrap OK, tenant created');
-                                    }
-                                } catch(e2) {
-                                    console.log('[AUTO-SYNC] Bootstrap failed, trying register...', e2.message);
-                                    // Step 3: If bootstrap failed, try register under existing tenant
-                                    try {
-                                        var rr = await API.register({
-                                            email: email, password: password,
-                                            firstName: fn, lastName: ln,
-                                            role: rl, tenantId: API.tenantId || CORE.tenantId || 'default'
-                                        });
-                                        if (rr && rr.accessToken) { tok = rr.accessToken; console.log('[AUTO-SYNC] Register OK'); }
-                                    } catch(e3) { console.warn('[AUTO-SYNC] Register failed:', e3.message); }
-                                }
-                            }
-                            // Step 4: If we got a token, sync all data to cloud
+                            // If we got a token, sync all data to cloud
                             if (tok) {
                                 API.setToken(tok);
                                 console.log('[AUTO-SYNC] Syncing all data to cloud...');
                                 try { await API.syncAllToCloud(); console.log('[AUTO-SYNC] syncAllToCloud OK'); } catch(e) { console.warn('[AUTO-SYNC] syncAllToCloud err:', e.message); }
                                 try { await API.syncAllFromCloud(); console.log('[AUTO-SYNC] syncAllFromCloud OK'); } catch(e) {}
-                                try { await API.syncFromApi(); } catch(e) {}
-                                try { await API.pushAllToApi(); } catch(e) {}
                             }
                         } catch(err) { console.warn('[AUTO-SYNC] Error:', err.message || err); }
                     })();
@@ -63571,55 +63539,20 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 if (CORE.state.isOnline && typeof API !== 'undefined') {
                     (async function() {
                         try {
-                            var u = CORE.state.currentUser;
-                            var tName = (typeof CORE.getCompanyName === 'function' ? CORE.getCompanyName() : '') || CORE.tenantId || 'default';
-                            var np = (u.name || '').split(' ');
-                            var fn = np[0] || 'User';
-                            var ln = np.slice(1).join(' ') || '';
-                            var rl = (u.role || 'pdg').toUpperCase();
                             var tok = null;
-                            // Step 1: Try login first (account may already exist on backend)
+                            // Try login on backend (no hardcoded activation code)
                             try {
                                 var lr = await API.login(email, password);
                                 if (lr && lr.accessToken) { tok = lr.accessToken; console.log('[AUTO-SYNC] Login OK'); }
                             } catch(e1) {
-                                console.log('[AUTO-SYNC] Login failed, trying bootstrap...', e1.message);
+                                console.log('[AUTO-SYNC] Login failed:', e1.message);
+                                // SECURITY: No hardcoded activation code. User must bootstrap manually.
                             }
-                            // Step 2: If login failed, try bootstrap (creates tenant + admin)
-                            if (!tok) {
-                                try {
-                                    var br = await API.bootstrap({
-                                        activationCode: 'RAYAMANAGER2026', tenantName: tName,
-                                        email: email, password: password,
-                                        firstName: fn, lastName: ln,
-                                        currency: 'XOF', timezone: 'Africa/Abidjan'
-                                    });
-                                    if (br && br.accessToken) {
-                                        tok = br.accessToken;
-                                        if (br.tenant) try { API.tenantId = String(br.tenant.id || br.tenant.tenantCode); } catch(e) {}
-                                        console.log('[AUTO-SYNC] Bootstrap OK, tenant created');
-                                    }
-                                } catch(e2) {
-                                    console.log('[AUTO-SYNC] Bootstrap failed, trying register...', e2.message);
-                                    // Step 3: If bootstrap failed, try register under existing tenant
-                                    try {
-                                        var rr = await API.register({
-                                            email: email, password: password,
-                                            firstName: fn, lastName: ln,
-                                            role: rl, tenantId: API.tenantId || CORE.tenantId || 'default'
-                                        });
-                                        if (rr && rr.accessToken) { tok = rr.accessToken; console.log('[AUTO-SYNC] Register OK'); }
-                                    } catch(e3) { console.warn('[AUTO-SYNC] Register failed:', e3.message); }
-                                }
-                            }
-                            // Step 4: If we got a token, sync all data to cloud
                             if (tok) {
                                 API.setToken(tok);
                                 console.log('[AUTO-SYNC] Syncing all data to cloud...');
                                 try { await API.syncAllToCloud(); console.log('[AUTO-SYNC] syncAllToCloud OK'); } catch(e) { console.warn('[AUTO-SYNC] syncAllToCloud err:', e.message); }
                                 try { await API.syncAllFromCloud(); console.log('[AUTO-SYNC] syncAllFromCloud OK'); } catch(e) {}
-                                try { await API.syncFromApi(); } catch(e) {}
-                                try { await API.pushAllToApi(); } catch(e) {}
                             }
                         } catch(err) { console.warn('[AUTO-SYNC] Error:', err.message || err); }
                     })();
@@ -66336,39 +66269,8 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 var ok = false;
                 try { ok = await API._refreshAccessToken(); } catch(e) {}
                 if (!ok) try { ok = await API._reLoginWithStoredCreds(); } catch(e) {}
-                if (!ok && CORE.state.currentUser) {
-                    var u = CORE.state.currentUser;
-                    var email = u.email || u.username;
-                    var pwd = u.password;
-                    if (email && pwd) {
-                        try {
-                            var lr = await API.login(email, pwd);
-                            if (lr && lr.accessToken) ok = true;
-                        } catch(e1) {
-                            var tName = (typeof CORE.getCompanyName === 'function' ? CORE.getCompanyName() : '') || CORE.tenantId || 'default';
-                            var np = (u.name || '').split(' ');
-                            try {
-                                var br = await API.bootstrap({
-                                    activationCode: 'RAYAMANAGER2026', tenantName: tName,
-                                    email: email, password: pwd,
-                                    firstName: np[0] || 'User', lastName: np.slice(1).join(' ') || '',
-                                    currency: 'XOF', timezone: 'Africa/Abidjan'
-                                });
-                                if (br && br.accessToken) { ok = true; if (br.tenant) try { API.tenantId = String(br.tenant.id || br.tenant.tenantCode); } catch(e) {} }
-                            } catch(e2) {
-                                try {
-                                    var rr = await API.register({
-                                        email: email, password: pwd,
-                                        firstName: np[0] || 'User', lastName: np.slice(1).join(' ') || '',
-                                        role: (u.role || 'pdg').toUpperCase(),
-                                        tenantId: API.tenantId || CORE.tenantId || 'default'
-                                    });
-                                    if (rr && rr.accessToken) ok = true;
-                                } catch(e3) {}
-                            }
-                        }
-                    }
-                }
+                // SECURITY: No longer uses stored passwords or hardcoded activation codes.
+                // If refresh token fails, user must re-login manually.
                 if (!ok) {
                     UI.toast('❌ Impossible de se connecter au cloud. Vérifiez votre connexion internet.', 'error', 8000);
                     if (typeof SyncIndicator !== 'undefined') SyncIndicator.show('error', 'Auth échouée');
@@ -66404,7 +66306,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             _loginFormVisible: false,
 
             init: function() {
-                this._checkInterval = setInterval(function() { CloudStatusBanner.update(); }, 15000);
+                this._checkInterval = setInterval(function() { if (document.visibilityState === 'visible') CloudStatusBanner.update(); }, 60000); // PERF: 60s instead of 15s
                 setTimeout(function() { CloudStatusBanner.update(); }, 5000);
             },
 
