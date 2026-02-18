@@ -4722,13 +4722,30 @@ select.form-input { cursor: pointer; }
                 if (cleaned27) {
                     ['orders', 'clients', 'deliveries', 'products', 'suppliers', 'categories', 'shiftTemplates',
                      'vendorBadges', 'mobileMoneProviders', 'alertRules', 'alertThresholds', 'financialTargets',
-                     'reportTemplates', 'productAttributeTypes', 'incidents', 'notifications'].forEach(col => {
+                     'reportTemplates', 'productAttributeTypes', 'incidents', 'notifications',
+                     'financialTransactions', 'stockMovements'].forEach(col => {
                         if (this.db[col]) this.markDirty(col);
                     });
                     this.save();
                     console.log('[MIGRATION v2.7] ✅ Re-cleanup complete & marked for cloud push');
                 } else {
                     console.log('[MIGRATION v2.7] No fake data found');
+                }
+            }
+
+            // MIGRATION v2.8: Clean fake financial transactions & stock movements (missed in v2.7)
+            if (!localStorage.getItem('raya_cleanup_v2_8')) {
+                console.log('[MIGRATION v2.8] Cleaning fake financial data...');
+                let cleaned28 = this._sanitizeFakeData();
+                localStorage.setItem('raya_cleanup_v2_8', '1');
+                if (cleaned28) {
+                    ['financialTransactions', 'stockMovements', 'orders', 'clients', 'deliveries', 'products'].forEach(col => {
+                        if (this.db[col]) this.markDirty(col);
+                    });
+                    this.save();
+                    console.log('[MIGRATION v2.8] ✅ Financial cleanup complete & marked for cloud push');
+                } else {
+                    console.log('[MIGRATION v2.8] No fake financial data found');
                 }
             }
 
@@ -4817,6 +4834,44 @@ select.form-input { cursor: pointer; }
                         return !id.startsWith('test_incident_') && !id.startsWith('demo_');
                     });
                     if (this.db.incidents.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.incidents.length, 'fake incidents'); }
+                }
+                // Fake financial transactions (linked to fake orders or demo-prefixed)
+                if (this.db.financialTransactions && this.db.financialTransactions.length > 0) {
+                    const fakeOrderRefs = /^CMD-00(0[1-9]|1[0-4])$/;
+                    const before = this.db.financialTransactions.length;
+                    this.db.financialTransactions = this.db.financialTransactions.filter(t => {
+                        const id = (t.id || '').toString();
+                        if (id.startsWith('demo_') || id.startsWith('test_tx_')) return false;
+                        const ref = (t.ref || '').toString();
+                        if (fakeOrderRefs.test(ref)) return false;
+                        const orderId = (t.orderId || '').toString();
+                        if (fakeOrderRefs.test(orderId)) return false;
+                        if (orderId.startsWith('test_order_') || orderId.startsWith('demo_')) return false;
+                        const note = (t.note || '').toLowerCase();
+                        if (note.includes('marcel bakala') || note.includes('sylvie moukoko')) return false;
+                        if (note.includes('cmd-0001') || note.includes('cmd-0002') || note.includes('cmd-0003') || note.includes('cmd-0004')) return false;
+                        if (note.includes('cmd-0010') || note.includes('cmd-0011') || note.includes('cmd-0012') || note.includes('cmd-0013') || note.includes('cmd-0014')) return false;
+                        const deliveryId = (t.deliveryId || '').toString();
+                        if (deliveryId.startsWith('test_delivery_') || deliveryId.startsWith('demo_')) return false;
+                        // userName "System" with no orderId and category sale is likely seed data
+                        return true;
+                    });
+                    if (this.db.financialTransactions.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.financialTransactions.length, 'fake financial transactions'); }
+                }
+                // Fake stock movements (linked to fake orders/products)
+                if (this.db.stockMovements && this.db.stockMovements.length > 0) {
+                    const before = this.db.stockMovements.length;
+                    this.db.stockMovements = this.db.stockMovements.filter(m => {
+                        const id = (m.id || '').toString();
+                        if (id.startsWith('demo_') || id.startsWith('test_')) return false;
+                        const ref = (m.ref || '').toString();
+                        if (/^CMD-00(0[1-9]|1[0-4])$/.test(ref)) return false;
+                        const productId = (m.productId || '').toString();
+                        if (productId.startsWith('test_product_') || productId.startsWith('demo_')) return false;
+                        if (/^(LAIT|RIZ)-001-/.test(productId)) return false;
+                        return true;
+                    });
+                    if (this.db.stockMovements.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.stockMovements.length, 'fake stock movements'); }
                 }
             } catch(e) { console.warn('[SANITIZE] Error:', e); }
             return cleaned;
