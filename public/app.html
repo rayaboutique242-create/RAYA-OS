@@ -60680,6 +60680,10 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             if (this._keepaliveInterval) { clearInterval(this._keepaliveInterval); this._keepaliveInterval = null; }
         },
 
+        _sleep(ms) {
+            return new Promise(function(resolve) { setTimeout(resolve, ms); });
+        },
+
         async request(path, options = {}) {
             const base = this.baseUrl || 'https://raya-backend-production.up.railway.app/api';
             const normalizedBase = base.endsWith('/api') ? base : base.replace(/\/+$/, '') + '/api';
@@ -60687,6 +60691,19 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
             const token = this.getToken();
             if (token) headers.Authorization = `Bearer ${token}`;
+            const method = options.method || 'GET';
+            const attempt = options._attempt || 0;
+            const maxRetries = (typeof options.retries === 'number')
+                ? options.retries
+                : (method === 'GET' ? 2 : ((path.includes('/auth/login') || path.includes('/auth/refresh')) ? 1 : 0));
+            const isRetriableStatus = function(status) {
+                return status === 429 || status === 502 || status === 503 || status === 504;
+            };
+            const nextBackoffMs = function(n) {
+                var baseMs = 500 * Math.pow(2, n);
+                var jitter = Math.floor(Math.random() * 200);
+                return Math.min(5000, baseMs + jitter);
+            };
 
             // PERF: AbortController with timeout — don't hang forever on slow/dead backends
             var timeoutMs = options.timeout || (options.method === 'GET' ? 15000 : 45000);
@@ -60697,7 +60714,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             var res;
             try {
                 res = await fetch(url, {
-                    method: options.method || 'GET',
+                    method,
                     headers,
                     credentials: 'include',
                     body: options.body ? JSON.stringify(options.body) : undefined,
@@ -60708,16 +60725,28 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 var elapsed = (performance.now() - _reqT0).toFixed(0);
                 if (fetchErr.name === 'AbortError') {
                     console.warn('[API] ⏱ TIMEOUT on ' + path + ' after ' + elapsed + 'ms');
+                    if (attempt < maxRetries) {
+                        var timeoutBackoff = nextBackoffMs(attempt);
+                        console.warn('[API] retry ' + (attempt + 1) + '/' + maxRetries + ' for ' + path + ' in ' + timeoutBackoff + 'ms (timeout)');
+                        await this._sleep(timeoutBackoff);
+                        return this.request(path, Object.assign({}, options, { _attempt: attempt + 1 }));
+                    }
                     var tErr = new Error('Timeout: le serveur ne répond pas (' + (timeoutMs/1000) + 's)');
                     tErr.status = 0;
                     tErr._timeout = true;
                     throw tErr;
                 }
                 console.warn('[API] Network error on ' + path + ' after ' + elapsed + 'ms:', fetchErr.message);
+                if (attempt < maxRetries) {
+                    var networkBackoff = nextBackoffMs(attempt);
+                    console.warn('[API] retry ' + (attempt + 1) + '/' + maxRetries + ' for ' + path + ' in ' + networkBackoff + 'ms (network)');
+                    await this._sleep(networkBackoff);
+                    return this.request(path, Object.assign({}, options, { _attempt: attempt + 1 }));
+                }
                 throw fetchErr;
             }
             clearTimeout(timeoutId);
-            console.log('[API-PERF] ' + (options.method || 'GET') + ' ' + path + ': ' + (performance.now() - _reqT0).toFixed(0) + 'ms → ' + res.status);
+            console.log('[API-PERF] ' + method + ' ' + path + ': ' + (performance.now() - _reqT0).toFixed(0) + 'ms → ' + res.status);
 
             // === AUTO-REFRESH ON 401 ===
             if (res.status === 401 && !options._retried && !path.includes('/auth/')) {
@@ -60746,6 +60775,12 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             }
 
             if (!res.ok) {
+                if (isRetriableStatus(res.status) && attempt < maxRetries) {
+                    var statusBackoff = nextBackoffMs(attempt);
+                    console.warn('[API] retry ' + (attempt + 1) + '/' + maxRetries + ' for ' + path + ' in ' + statusBackoff + 'ms (status ' + res.status + ')');
+                    await this._sleep(statusBackoff);
+                    return this.request(path, Object.assign({}, options, { _attempt: attempt + 1 }));
+                }
                 const errText = await res.text();
                 // P2: Preserve HTTP status on error for conflict handling
                 var err = new Error(errText || `API error ${res.status}`);
@@ -61901,13 +61936,18 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 var PAGED_THRESHOLD = 500;
                 for (var bi = 0; bi < changedCols.length; bi++) {
                     var bcol = changedCols[bi];
+                    var cloudVersion = (bcol && typeof bcol.version === 'number') ? bcol.version : null;
+                    if (cloudVersion !== null && this._cloudVersions[bcol.collection] === cloudVersion) {
+                        console.log('[SYNC-ALL] Skip ' + bcol.collection + ' (version unchanged: ' + cloudVersion + ')');
+                        continue;
+                    }
                     var allData = [];
                     var offset = 0;
                     var pageSize = 1000;
                     var hasMore = (bcol.count > PAGED_THRESHOLD);
                     if (hasMore) console.log('[SYNC-ALL] Paging ' + bcol.collection + ' (' + bcol.count + ' items)...');
                     while (hasMore) {
-                        var page = await this.request('/sync/' + bcol.collection + '?offset=' + offset + '&limit=' + pageSize, { method: 'GET' });
+                        var page = await this.request('/sync/' + bcol.collection + '?offset=' + offset + '&limit=' + pageSize + '&light=1', { method: 'GET' });
                         if (page && Array.isArray(page.data)) {
                             allData = allData.concat(page.data);
                             hasMore = !!page.hasMore;
@@ -61915,12 +61955,16 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         } else { hasMore = false; }
                     }
                     if (allData.length === 0 && !hasMore) {
-                        var single = await this.request('/sync/' + bcol.collection, { method: 'GET' });
+                        var single = await this.request('/sync/' + bcol.collection + '?light=1', { method: 'GET' });
                         allData = (single && Array.isArray(single.data)) ? single.data : [];
+                        if (single && typeof single.version === 'number') {
+                            this.updateCloudVersions({ [bcol.collection]: single.version });
+                        }
                     }
                     var localArr = CORE.db[bcol.collection];
                     if (!Array.isArray(localArr)) { CORE.db[bcol.collection] = allData; }
                     else { CORE.db[bcol.collection] = API._smartMerge(localArr, allData); }
+                    if (cloudVersion !== null) this.updateCloudVersions({ [bcol.collection]: cloudVersion });
                     merged++;
                     console.log('[SYNC-ALL] ' + bcol.collection + ': ' + allData.length + ' items merged');
                 }
@@ -61965,7 +62009,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     var limit = 1000;
                     var hasMore = true;
                     while (hasMore) {
-                        var page = await this.request('/sync/' + encodeURIComponent(col) + '?offset=' + offset + '&limit=' + limit, { method: 'GET' });
+                        var page = await this.request('/sync/' + encodeURIComponent(col) + '?offset=' + offset + '&limit=' + limit + '&light=1', { method: 'GET' });
                         var pageData = (page && Array.isArray(page.data)) ? page.data : [];
                         allData = allData.concat(pageData);
                         hasMore = !!(page && page.hasMore);
