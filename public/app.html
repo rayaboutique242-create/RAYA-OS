@@ -1951,10 +1951,10 @@ select.form-input { cursor: pointer; }
         try {
             if (window.CORE && window.CORE.config) {
                 window.CORE.config.googleMapsApiKey = '';
-                try { window.CORE.save && window.CORE.save(); } catch (e) {}
+                try { window.CORE.save && window.CORE.save(); } catch (e) { console.warn('[MAPS] CORE.save failed:', e); }
             }
-        } catch (e) {}
-        try { UI?.toast && UI.toast('Google Maps API: clé invalide (fallback iframe).', 'warning'); } catch (e) {}
+        } catch (e) { console.warn('[MAPS] Failed to clear Google Maps API key:', e); }
+        try { UI?.toast && UI.toast('Google Maps API: clé invalide (fallback iframe).', 'warning'); } catch (e) { console.warn('[MAPS] UI.toast failed:', e); }
     };
 
     const Maps = {
@@ -3643,7 +3643,7 @@ select.form-input { cursor: pointer; }
                                 const meData = await API.getMe();
                                 if (meData) {
                                     const tenantId = meData.tenantId || CORE.tenantId || 'default';
-                                    try { API.tenantId = tenantId; } catch(e) {}
+                                    try { API.tenantId = tenantId; } catch(e) { console.warn('[AUTH] Failed to set API.tenantId:', e); }
                                     
                                     if (typeof CORE.tenantExists === 'function' && !CORE.tenantExists(tenantId)) {
                                         if (typeof CORE.createTenantWithAdmin === 'function') {
@@ -3690,7 +3690,7 @@ select.form-input { cursor: pointer; }
                                         if (accIdx >= 0) { accts[accIdx].refreshToken = newRT; this.saveAccounts(accts); }
                                     }
                                     
-                                    try { await API.syncAllFromCloud(); } catch(e) {}
+                                    try { await API.syncAllFromCloud(); } catch(e) { console.warn('[SYNC] syncAllFromCloud failed after account switch:', e.message); }
                                     
                                     CORE.state.currentUser = localUser;
                                     CORE.save(true);
@@ -4959,10 +4959,12 @@ select.form-input { cursor: pointer; }
                 if (!this._saveTimer) {
                     this._saveTimer = setTimeout(function() {
                         self._saveTimer = null;
-                        _doSave();
+                        // P2-11 FIX: Call save(true) instead of raw _doSave()
+                        // so cloud push is also triggered after debounce
+                        self.save(true);
                     }, 1000);
                 }
-                return; // skip cloud push — debounced save will trigger it
+                return;
             }
 
             // === CLOUD-FIRST: Push to server (source of truth) ===
@@ -7343,7 +7345,7 @@ select.form-input { cursor: pointer; }
                     this.db.gestionnaireSettings = { ...defaults, ...parsed };
                     this.markDirty('gestionnaireSettings');
                     this.save();
-                } catch(e) {}
+                } catch(e) { console.warn('[MIGRATION] gestionnaire settings migration failed:', e); }
                 localStorage.removeItem('gestionnaire_settings');
             }
 
@@ -19928,7 +19930,7 @@ select.form-input { cursor: pointer; }
             if (openAssign) {
                 // Ouvre directement la modale d’assignation après l’enregistrement
                 setTimeout(() => {
-                    try { VendeurModule.showAssignDeliveryModal(deliveryId); } catch(e) {}
+                    try { VendeurModule.showAssignDeliveryModal(deliveryId); } catch(e) { console.warn('[DELIVERY] showAssignDeliveryModal failed:', e); }
                 }, 0);
             }
 
@@ -20053,7 +20055,7 @@ select.form-input { cursor: pointer; }
                     const msg = `Rappel course ${d.orderRef}. Cette course vous a été retirée. Raison: ${reason || '—'}.`;
                     // Ne force pas l'ouverture SMS automatiquement (pas souhaité). On garde juste une notification interne.
                     CORE.notify('info', `Livreur informé (rappel): ${previousLivreur.name}`, { deliveryId: d.id, previousLivreurId });
-                } catch(e) {}
+                } catch(e) { console.warn('[DELIVERY] Failed to notify previous livreur:', e); }
             }
 
             UI.closeModal();
@@ -46174,46 +46176,9 @@ Rapport généré par le système d'IA de gestion du stock
             ]);
         },
 
+        // P2-9: Delegate to ManagerModule (single source of truth — avoids 40-line duplication)
         productBelongsToPos(product, posId) {
-            if (!posId) return true;
-            if (!product) return false;
-            const strPosId = String(posId);
-            
-            // Si produit est verrouillé à un POS spécifique (créé par gestionnaire assigné)
-            if (product.lockedToPosId && String(product.lockedToPosId) !== strPosId) {
-                return false;
-            }
-            
-            // Si le produit a un posId défini, il appartient EXCLUSIVEMENT à ce POS
-            // sauf s'il a été explicitement transféré vers un autre POS via posStocks
-            if (product.posId !== null && product.posId !== undefined) {
-                if (String(product.posId) === strPosId) return true;
-                
-                // Vérifier si le produit a été transféré vers ce POS (a du stock dans posStocks)
-                const stockMap = product.posStocks || {};
-                const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
-                if (!entry) return false;
-                const stock = Number(entry.stock ?? entry.quantity ?? 0);
-                if (Number.isFinite(stock) && stock > 0) return true;
-                if (entry.assigned === true) return true;
-                if (entry.lastMovement || entry.lastUpdated || entry.lastTransfer || entry.lastRestock) return true;
-                return false;
-            }
-            
-            // Pour les produits sans posId (produits globaux/main warehouse)
-            if (product.isMainWarehouse) return false; // Les produits du dépôt principal ne sont pas dans les POS
-            
-            // Vérifier posStocks pour les produits globaux
-            const stockMap = product.posStocks || {};
-            const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
-            if (!entry) return false;
-            const stock = Number(entry.stock ?? entry.quantity ?? 0);
-            if (Number.isFinite(stock) && stock > 0) return true;
-            if (entry.assigned === true) return true;
-            if (entry.lastMovement || entry.lastUpdated || entry.lastTransfer || entry.lastRestock) return true;
-            if (Array.isArray(entry.variants) && entry.variants.length > 0) return true;
-            if (entry.price !== undefined && entry.price !== null && entry.price !== product.price) return true;
-            return false;
+            return ManagerModule.productBelongsToPos(product, posId);
         },
 
         renderInventory(options = {}) {
@@ -59404,11 +59369,12 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             this.showUsersManagementModal();
         },
 
+        // P2-10: Delegate to ManagerModule (identical modal — avoids 50-line duplication)
+        // Note: PDG has full access, no role check needed (ManagerModule checks but PDG always passes)
         showChangePasswordModal(userId) {
             const user = CORE.getUser(userId);
             if (!user) return UI.toast('Utilisateur non trouvé', 'error');
-
-            UI.modal(`Changer le mot de passe: ${user.name}`, `
+            UI.modal(`Changer le mot de passe: ${Utils.escapeHtml(user.name)}`, `
                 <div class="space-y-4 bg-blue-50 border border-blue-200 rounded-2xl p-4 mb-4">
                     <div class="text-sm text-blue-800">
                         <div class="font-black mb-2">⚠️ Attention</div>
@@ -59426,35 +59392,9 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             ]);
         },
 
+        // Delegates to ManagerModule.savePasswordChange (same logic, keeps PDG context via this binding)
         async savePasswordChange(userId) {
-            const user = CORE.getUser(userId);
-            if (!user) return UI.toast('Utilisateur non trouvé', 'error');
-
-            const newPassword = document.getElementById('change-password-input')?.value || '';
-            if (newPassword.length < 6) return UI.toast('Le mot de passe doit avoir au minimum 6 caractères', 'warning');
-
-            // Hacher le nouveau mot de passe
-            const hash = await Utils.md5(newPassword);
-            user.password = newPassword;
-            user.passwordHash = hash;
-
-            // Propager dans l'index global
-            CORE._syncGlobalFromTenant();
-            CORE.save();
-            CORE.markDirty('users');
-            CORE.logAudit('update', 'user', userId, user.name, { description: `Mot de passe changé manuellement (PDG)` });
-
-            // Sync cloud
-            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated()) {
-                try {
-                    await API.request('/sync/users', { method: 'PUT', body: { data: CORE.db.users || [] } });
-                    console.log('[PDG] Cloud users synced after password change');
-                } catch(e) { console.warn('[PDG] Cloud sync password change failed:', e.message); }
-            }
-
-            UI.toast(`Mot de passe de ${user.name} changé avec succès`, 'success');
-            UI.closeModal();
-            this.showUsersManagementModal();
+            return ManagerModule.savePasswordChange.call(this, userId);
         },
 
         async toggleUserActive(userId) {
@@ -59825,7 +59765,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 try {
                     const sessionId = localStorage.getItem('raya_session_id');
                     await API.request('/auth/logout', { method: 'POST', body: sessionId ? { sessionId } : {} });
-                } catch(e) {}
+                } catch(e) { console.warn('[DELETE-ACCOUNT] Backend logout failed:', e.message); }
             }
 
             // 3. Clear ALL auth tokens
@@ -59834,7 +59774,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             try { localStorage.removeItem('raya_session_id'); } catch(e){}
             try { localStorage.removeItem('raya_creds_v2'); } catch(e){}
             try { localStorage.removeItem('raya_creds'); } catch(e){}
-            try { API.clearTokens(); } catch(e){}
+            try { API.clearTokens(); } catch(e){ console.warn('[DELETE-ACCOUNT] API.clearTokens failed:', e); }
 
             // 4. Delete all local data
             UI.closeModal();
@@ -60347,9 +60287,9 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         if (!reqId) continue;
                         try {
                             await API.request('/invitations/requests/' + reqId + '/approve', { method: 'POST', body: { role: role, storeId: storeId } });
-                        } catch(_e) {}
+                        } catch(_e) { console.warn('[INVITE] Auto-approve request failed:', _e.message || _e); }
                     }
-                } catch(_cleanupErr) {}
+                } catch(_cleanupErr) { console.warn('[INVITE] Cleanup auto-approve failed:', _cleanupErr.message || _cleanupErr); }
 
                 // Optimistic update: remove member from pending list
                 if (PDGModule._pendingMembers) {
@@ -60492,7 +60432,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     PDGModule._invitations = Array.isArray(invitations) ? invitations : (invitations?.data || invitations?.invitations || []);
                     PDGModule._joinRequests = Array.isArray(joinRequests) ? joinRequests : (joinRequests?.data || joinRequests?.requests || []);
                     PDGModule._pendingMembers = Array.isArray(pendingMembers) ? pendingMembers : [];
-                } catch(e) {}
+                } catch(e) { console.warn('[INVITE] Failed to refresh invitation data:', e.message || e); }
             } catch(e) {
                 console.error('[INVITE] Error:', e);
                 let errorMsg = e.message || 'Erreur inconnue';
@@ -61851,7 +61791,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             if (!this.isAuthenticated() || !navigator.onLine) return false;
             try {
                 var _pushT0 = performance.now();
-                try { await this.pushEvents(); } catch(e) {}
+                try { await this.pushEvents(); } catch(e) { console.warn('[SYNC] pushEvents failed:', e.message); }
                 var dirty = CORE.getDirtyCollections();
                 if (!dirty || dirty.length === 0) {
                     console.log('[SYNC-ALL] No dirty collections to push');
@@ -62428,7 +62368,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
         _finishInit() {
             // Defer heavy boot tasks to avoid blocking first render
             this.defer(() => {
-                try { VendeurModule?.init && VendeurModule.init(); } catch(e) {}
+                try { VendeurModule?.init && VendeurModule.init(); } catch(e) { console.warn('[BOOT] VendeurModule.init failed:', e); }
                 CORE.reconcileFinance();
                 CORE.initDailyDigestScheduler();
                 CORE.initPendingArrivalsScheduler();
@@ -62588,8 +62528,8 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                                     console.log('[SYNC-REAUTH] ✅ Authenticated! Running full sync...');
                                     API.startProactiveRefresh();
                                     App._reauthAttemptCount = 0; // Reset counter on success
-                                    try { await API.syncAllFromCloud(); } catch(e) {}
-                                    try { await API.syncAllToCloud(); } catch(e) {}
+                                    try { await API.syncAllFromCloud(); } catch(e) { console.warn('[SYNC-REAUTH] syncAllFromCloud failed:', e.message); }
+                                    try { await API.syncAllToCloud(); } catch(e) { console.warn('[SYNC-REAUTH] syncAllToCloud failed:', e.message); }
                                     CORE.clearDirty();
                                     CORE.clearChangeLog();
                                     if (typeof UI !== 'undefined' && UI.toast) UI.toast('☁ Synchronisation cloud activée', 'success', 3000);
@@ -62723,8 +62663,8 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             role = role.toLowerCase().trim();
             const mod = this.getActiveModule();
             if (mod) {
-                try { if (typeof mod.applyTheme === 'function') mod.applyTheme(); } catch(e){}
-                try { if (typeof mod.init === 'function') mod.init(); } catch(e){}
+                try { if (typeof mod.applyTheme === 'function') mod.applyTheme(); } catch(e){ console.warn('[APP] Module applyTheme failed:', e); }
+                try { if (typeof mod.init === 'function') mod.init(); } catch(e){ console.warn('[APP] Module init failed:', e); }
             }
             this.rerender();
 
@@ -62766,9 +62706,9 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 // Store for dashboard banner & trigger re-render if changed
                 if (App._pendingEmployeeTotal !== total) {
                     App._pendingEmployeeTotal = total;
-                    try { App.rerender(); } catch(e) {}
+                    try { App.rerender(); } catch(e) { console.warn('[POLL] App.rerender failed:', e); }
                 }
-            } catch(e) {}
+            } catch(e) { console.warn('[POLL] Pending employee check failed:', e.message || e); }
         },
         _lastPendingCount: 0,
         _pendingEmployeeTotal: 0,
@@ -62817,7 +62757,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
 
         logout() {
             // Fermer tous les modals/widgets ouverts
-            try { UI.closeModal(); } catch(e){}
+            try { UI.closeModal(); } catch(e){ console.warn('[LOGOUT] UI.closeModal failed:', e); }
 
             // === SaaS-grade logout: call backend to revoke session ===
             var sessionId = localStorage.getItem('raya_session_id');
@@ -62838,7 +62778,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             try { localStorage.removeItem('raya_api_tokens'); } catch(e){}
 
             // Stopper l'auto-sync
-            try { if (typeof OfflineManager !== 'undefined') OfflineManager.stopAutoSync(); } catch(e){}
+            try { if (typeof OfflineManager !== 'undefined') OfflineManager.stopAutoSync(); } catch(e){ console.warn('[LOGOUT] OfflineManager.stopAutoSync failed:', e); }
 
             // Nettoyer l'état utilisateur
             if (CORE.state) CORE.state.currentUser = null;
@@ -63274,7 +63214,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             if (App._pendingPollTimer) { clearInterval(App._pendingPollTimer); App._pendingPollTimer = null; }
             App._pendingApproval = null;
             API.setToken(null);
-            try { localStorage.removeItem('raya_refresh_token'); localStorage.removeItem('raya_session_id'); } catch(e) {}
+            try { localStorage.removeItem('raya_refresh_token'); localStorage.removeItem('raya_session_id'); } catch(e) { console.warn('[AUTH] Failed to clear refresh/session tokens:', e); }
             CORE.state.currentUser = null;
             CORE.save();
             App.state.currentView = 'onboarding';
@@ -63316,7 +63256,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         console.log('[LOGIN] API success:', email, '→ tenant:', tenantId, 'role:', apiUser.role);
 
                         // Set tenant on API
-                        try { API.tenantId = tenantId; } catch(e) {}
+                        try { API.tenantId = tenantId; } catch(e) { console.warn('[LOGIN] Failed to set API.tenantId:', e); }
 
                         // Ensure tenant exists locally
                         if (typeof CORE.tenantExists === 'function' && !CORE.tenantExists(tenantId)) {
@@ -63514,7 +63454,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                                 API.setToken(tok);
                                 console.log('[AUTO-SYNC] Syncing all data to cloud...');
                                 try { await API.syncAllToCloud(); console.log('[AUTO-SYNC] syncAllToCloud OK'); } catch(e) { console.warn('[AUTO-SYNC] syncAllToCloud err:', e.message); }
-                                try { await API.syncAllFromCloud(); console.log('[AUTO-SYNC] syncAllFromCloud OK'); } catch(e) {}
+                                try { await API.syncAllFromCloud(); console.log('[AUTO-SYNC] syncAllFromCloud OK'); } catch(e) { console.warn('[AUTO-SYNC] syncAllFromCloud err:', e.message); }
                             }
                         } catch(err) { console.warn('[AUTO-SYNC] Error:', err.message || err); }
                     })();
@@ -63552,7 +63492,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                                 API.setToken(tok);
                                 console.log('[AUTO-SYNC] Syncing all data to cloud...');
                                 try { await API.syncAllToCloud(); console.log('[AUTO-SYNC] syncAllToCloud OK'); } catch(e) { console.warn('[AUTO-SYNC] syncAllToCloud err:', e.message); }
-                                try { await API.syncAllFromCloud(); console.log('[AUTO-SYNC] syncAllFromCloud OK'); } catch(e) {}
+                                try { await API.syncAllFromCloud(); console.log('[AUTO-SYNC] syncAllFromCloud OK'); } catch(e) { console.warn('[AUTO-SYNC] syncAllFromCloud err:', e.message); }
                             }
                         } catch(err) { console.warn('[AUTO-SYNC] Error:', err.message || err); }
                     })();
@@ -64140,13 +64080,13 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
 
                     if (loginRes?.refreshToken) {
 
-                        try { localStorage.setItem('raya_refresh_token', loginRes.refreshToken); } catch(e) {}
+                        try { localStorage.setItem('raya_refresh_token', loginRes.refreshToken); } catch(e) { console.warn('[AUTH] Failed to store refresh token:', e); }
 
                     }
 
                     if (loginRes?.sessionId) {
 
-                        try { localStorage.setItem('raya_session_id', loginRes.sessionId); } catch(e) {}
+                        try { localStorage.setItem('raya_session_id', loginRes.sessionId); } catch(e) { console.warn('[AUTH] Failed to store session ID:', e); }
 
                     }
 
@@ -64211,7 +64151,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
 
                     // 6. Set API tenant
 
-                    try { API.tenantId = String(tenantId); } catch(e) {}
+                    try { API.tenantId = String(tenantId); } catch(e) { console.warn('[AUTH] Failed to set API.tenantId:', e); }
 
                     
 
@@ -66267,8 +66207,8 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 console.log('[FORCE-SYNC] Not authenticated — trying to authenticate...');
                 UI.toast('Connexion au cloud en cours...', 'info', 3000);
                 var ok = false;
-                try { ok = await API._refreshAccessToken(); } catch(e) {}
-                if (!ok) try { ok = await API._reLoginWithStoredCreds(); } catch(e) {}
+                try { ok = await API._refreshAccessToken(); } catch(e) { console.warn('[FORCE-SYNC] _refreshAccessToken failed:', e.message); }
+                if (!ok) try { ok = await API._reLoginWithStoredCreds(); } catch(e) { console.warn('[FORCE-SYNC] _reLoginWithStoredCreds failed:', e.message); }
                 // SECURITY: No longer uses stored passwords or hardcoded activation codes.
                 // If refresh token fails, user must re-login manually.
                 if (!ok) {
@@ -66389,7 +66329,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
 
                     // Step 2: Set tenant
                     if (result.user && result.user.tenantId) {
-                        try { API.tenantId = String(result.user.tenantId); } catch(e) {}
+                        try { API.tenantId = String(result.user.tenantId); } catch(e) { console.warn('[FORCE-SYNC] Failed to set API.tenantId:', e); }
                     }
 
                     // Step 3: Start proactive refresh + keepalive
