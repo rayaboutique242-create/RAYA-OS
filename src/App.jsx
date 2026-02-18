@@ -1,6 +1,7 @@
 import React from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
+import ErrorBoundary from './components/ErrorBoundary'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ToastProvider } from './contexts/ToastContext'
 import { ModalProvider } from './components/Modal'
@@ -28,7 +29,14 @@ function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
   if (loading) return <div style={{ padding: 40, textAlign: 'center' }}>Chargement...</div>
   if (!user) return <Navigate to="/login" replace />
-  return children
+  // User is authenticated — redirect to the full HTML app
+  window.location.href = '/app.html'
+  return <div style={{ padding: 40, textAlign: 'center' }}>Redirection...</div>
+}
+
+function RedirectToApp() {
+  React.useEffect(() => { window.location.href = '/app.html' }, [])
+  return <div style={{ padding: 40, textAlign: 'center' }}>Redirection vers RAYA.os...</div>
 }
 
 function AppRoutes() {
@@ -43,6 +51,7 @@ function AppRoutes() {
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/2fa-verify" element={<TwoFactorVerify />} />
       <Route path="/onboarding" element={<Onboarding />} />
+      <Route path="/join" element={<Onboarding />} />
 
       {/* Protected dashboard routes */}
       <Route path="/dashboard/*" element={
@@ -65,8 +74,10 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
 
-      {/* Redirects */}
-      <Route path="/" element={<Navigate to={user ? "/dashboard" : "/login"} replace />} />
+      {/* Redirects — send unauthenticated users straight to the HTML app */}
+      <Route path="/" element={
+        user ? <Navigate to="/dashboard" replace /> : <RedirectToApp />
+      } />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
@@ -74,12 +85,14 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <ToastProvider>
-        <ModalProvider>
-          <AppRoutes />
-        </ModalProvider>
-      </ToastProvider>
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <ToastProvider>
+          <ModalProvider>
+            <AppRoutes />
+          </ModalProvider>
+        </ToastProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   )
 }

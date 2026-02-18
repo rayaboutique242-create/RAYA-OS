@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { getDashboardStatsLocal, createInvitation, getInvitations } from '../utils/api'
+import { request, createInvitation, getInvitations } from '../utils/api'
 import StatsCard from '../components/StatsCard'
 import { useToast } from '../contexts/ToastContext'
 import { useAuth } from '../contexts/AuthContext'
@@ -10,12 +10,33 @@ export default function PDGDashboard(){
   const [creating, setCreating] = useState(false)
   const [role, setRole] = useState('VENDEUR')
   const [expires, setExpires] = useState(72)
-  const { show } = useToast()
+  const { showToast } = useToast()
   const { user } = useAuth()
 
   useEffect(()=>{
     let mounted = true
-    getDashboardStatsLocal().then(r => { if(mounted) setStats(r); show('Bienvenue sur le dashboard PDG', 'success', 2500) })
+    // Load real dashboard stats from API
+    ;(async () => {
+      try {
+        const [ordersData, productsData, customersData] = await Promise.allSettled([
+          request('/orders?limit=100').catch(() => null),
+          request('/products').catch(() => null),
+          request('/customers').catch(() => null),
+        ])
+        const orders = ordersData.status === 'fulfilled' && ordersData.value
+        const products = productsData.status === 'fulfilled' && productsData.value
+        const customers = customersData.status === 'fulfilled' && customersData.value
+        const orderList = Array.isArray(orders) ? orders : orders?.data || orders?.items || []
+        const customerList = Array.isArray(customers) ? customers : customers?.data || customers?.items || []
+        const revenue = orderList.reduce((s, o) => s + (o.total || o.totalAmount || 0), 0)
+        if (mounted) {
+          setStats({ revenue, orders: orderList.length, customers: customerList.length, currency: 'XAF' })
+          showToast('Bienvenue sur le dashboard PDG', 'success', 2500)
+        }
+      } catch (e) {
+        if (mounted) setStats({ revenue: 0, orders: 0, customers: 0, currency: 'XAF' })
+      }
+    })()
     return ()=> mounted = false
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[])
@@ -28,29 +49,30 @@ export default function PDGDashboard(){
 
   async function loadInvitations(){
     try{
-      const list = await getInvitations(user.companyId)
-      setInvitations(list)
+      const tenantId = user?.companyId || user?.tenantId
+      const list = await getInvitations(tenantId)
+      setInvitations(Array.isArray(list) ? list : [])
     }catch(e){ console.warn('Failed to load invitations', e) }
   }
 
   async function handleCreateInvitation(){
-    if(!user || !user.companyId) return show('Impossible: CompanyId manquant', 'error')
+    const tenantId = user?.companyId || user?.tenantId
+    if(!tenantId) return showToast('Impossible: CompanyId manquant', 'error')
     setCreating(true)
     try{
-      const res = await createInvitation({ tenantId: user.companyId, role, expiresInHours: Number(expires) })
-      show('Invitation créée: ' + res.code, 'success')
+      const res = await createInvitation({ tenantId: user?.companyId || user?.tenantId, role, expiresInHours: Number(expires) })
+      showToast('Invitation créée: ' + res.code, 'success')
       setInvitations(prev => [res, ...prev])
     }catch(e){
-      // If unauthorized (token expired) try showing a friendly message
-      show('Erreur création invitation: ' + (e?.message||e), 'error')
+      showToast('Erreur création invitation: ' + (e?.message||e), 'error')
       if(e?.message === 'Unauthorized'){
-        show('Session expirée — veuillez vous reconnecter', 'warning')
+        showToast('Session expirée — veuillez vous reconnecter', 'warning')
       }
     }finally{ setCreating(false) }
   }
 
   function copyCode(code){
-    try{ navigator.clipboard.writeText(code); show('Copié dans le presse-papiers', 'success') }catch(e){ show('Impossible de copier', 'error') }
+    try{ navigator.clipboard.writeText(code); showToast('Copié dans le presse-papiers', 'success') }catch(e){ showToast('Impossible de copier', 'error') }
   }
 
   return (
@@ -70,6 +92,7 @@ export default function PDGDashboard(){
             <option>VENDEUR</option>
             <option>MANAGER</option>
             <option>GESTIONNAIRE</option>
+            <option>LIVREUR</option>
           </select>
           <input type="number" value={expires} onChange={e=>setExpires(e.target.value)} style={{width:120}} />
           <button onClick={handleCreateInvitation} disabled={creating}>{creating ? 'Création...' : 'Créer une invitation'}</button>
