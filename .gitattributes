@@ -1,0 +1,2 @@
+# Force UTF-8 binary handling for HTML to prevent encoding corruption
+*.html binary
