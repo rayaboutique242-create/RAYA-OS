@@ -40443,6 +40443,36 @@ Rapport généré par le système d'IA de gestion du stock
 
         navigateTo(view) { this.state.currentView = view; App.rerender(); },
 
+        // productBelongsToPos — checks if a product belongs to a specific POS
+        productBelongsToPos(product, posId) {
+            if (!posId) return true;
+            if (!product) return false;
+            const strPosId = String(posId);
+            if (product.lockedToPosId && String(product.lockedToPosId) !== strPosId) return false;
+            if (product.posId !== null && product.posId !== undefined) {
+                if (String(product.posId) === strPosId) return true;
+                const stockMap = product.posStocks || {};
+                const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
+                if (!entry) return false;
+                const stock = Number(entry.stock ?? entry.quantity ?? 0);
+                if (Number.isFinite(stock) && stock > 0) return true;
+                if (entry.assigned === true) return true;
+                if (entry.lastMovement || entry.lastUpdated || entry.lastTransfer || entry.lastRestock) return true;
+                return false;
+            }
+            if (product.isMainWarehouse) return false;
+            const stockMap = product.posStocks || {};
+            const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
+            if (!entry) return false;
+            const stock = Number(entry.stock ?? entry.quantity ?? 0);
+            if (Number.isFinite(stock) && stock > 0) return true;
+            if (entry.assigned === true) return true;
+            if (entry.lastMovement || entry.lastUpdated || entry.lastTransfer || entry.lastRestock) return true;
+            if (Array.isArray(entry.variants) && entry.variants.length > 0) return true;
+            if (entry.price !== undefined && entry.price !== null && entry.price !== product.price) return true;
+            return false;
+        },
+
         // Afficher les détails d'une livraison avec preuves (Manager)
         showDeliveryDetail(deliveryId) {
             const d = CORE.getVisibleDeliveries().find(x => x.id === deliveryId);
