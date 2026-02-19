@@ -6662,11 +6662,6 @@ select.form-input { cursor: pointer; }
             const qty = Math.max(0, Number(quantity) || 0);
             if (qty <= 0) return null;
 
-            // Vérifier que le produit existe dans le POS source
-            // (Normalement le produit a un posId, mais dans un système multi-POS réel,
-            // on devrait avoir une table separée de stock par POS)
-
-            // ===== CRITICAL FIX: ADD PRODUCT TO DESTINATION POS =====
             // Initialize posStocks if not exists
             if (!product.posStocks) {
                 product.posStocks = {};
@@ -6679,26 +6674,36 @@ select.form-input { cursor: pointer; }
                 };
             }
 
-            // Ensure destination POS has this product in posStocks
-            if (!product.posStocks[toPosId]) {
-                product.posStocks[toPosId] = {
-                    stock: 0,
-                    lastUpdated: new Date().toISOString()
-                };
+            // Déduire le stock source immédiatement (réservation pour transfert)
+            product.posStocks[fromPosId].stock -= qty;
+            if (product.posStocks[fromPosId].stock < 0) {
+                product.posStocks[fromPosId].stock = 0;
             }
+            product.posStocks[fromPosId].lastUpdated = new Date().toISOString();
 
-            // Add transferred quantity to destination
-            product.posStocks[toPosId].stock += qty;
-            product.posStocks[toPosId].lastUpdated = new Date().toISOString();
+            // NE PAS ajouter au POS destination — le gestionnaire doit confirmer la réception
 
-            // Reduce stock from source POS
-            if (product.posStocks[fromPosId]) {
-                product.posStocks[fromPosId].stock -= qty;
-                if (product.posStocks[fromPosId].stock < 0) {
-                    product.posStocks[fromPosId].stock = 0;
-                }
-                product.posStocks[fromPosId].lastUpdated = new Date().toISOString();
-            }
+            // Créer le transfert en attente
+            const transferId = 'TRF-' + Date.now().toString(36).toUpperCase();
+            this.db.stockTransfers = this.db.stockTransfers || [];
+            this.db.stockTransfers.push({
+                id: transferId,
+                productId: productId,
+                productName: product.name,
+                qty: qty,
+                sourcePosId: fromPosId,
+                sourcePosName: fromPos.name,
+                destPosId: toPosId,
+                destPosName: toPos.name,
+                reason: notes || 'Transfert inter-POS',
+                status: 'pending',
+                createdBy: this.state.currentUser?.id,
+                createdByName: this.state.currentUser?.name || 'Système',
+                createdAt: new Date().toISOString(),
+                receivedAt: null,
+                receivedBy: null,
+                receivedByName: null
+            });
 
             const movement = this.recordStockMovement({
                 type: 'transfer',
@@ -6707,7 +6712,8 @@ select.form-input { cursor: pointer; }
                 posId: fromPosId,
                 fromPosId,
                 toPosId,
-                notes,
+                notes: (notes || '') + ' - Transfert en attente vers ' + toPos.name,
+                ref: transferId,
                 reason: 'transfer_request',
                 meta: {
                     source: 'manager_transfer',
@@ -6716,8 +6722,23 @@ select.form-input { cursor: pointer; }
                 }
             });
 
+            // Notification pour le POS destinataire
+            this.db.notifications = this.db.notifications || [];
+            this.db.notifications.push({
+                id: 'NOTIF-' + this.uid(),
+                type: 'transfer_incoming',
+                title: '📦 Transfert entrant',
+                message: qty + ' x ' + product.name + ' en provenance de ' + fromPos.name,
+                transferId: transferId,
+                posId: toPosId,
+                createdAt: new Date().toISOString(),
+                read: false
+            });
+
             this.markDirty('products');
             this.markDirty('stockMovements');
+            this.markDirty('stockTransfers');
+            this.markDirty('notifications');
             return movement;
         },
 
@@ -44336,40 +44357,27 @@ Rapport généré par le système d'IA de gestion du stock
                 return UI.toast(`Stock insuffisant (disponible: ${sourceStock})`, 'error');
             }
 
-            // Effectuer le transfert
-            const newSourceStock = sourceStock - qty;
-            const destStock = (CORE.getProductStock(productId, destPosId) || 0);
-            const newDestStock = destStock + qty;
-
-            // Mettre à jour les stocks
-            CORE.setProductStock(productId, sourcePosId, newSourceStock);
-            CORE.setProductStock(productId, destPosId, newDestStock);
-
-            // Enregistrer les mouvements de stock
+            // Créer un transfert en attente (le POS destinataire doit confirmer la réception)
             const transferRef = `TRANSFER-${Utils.uid('TR').substring(0, 8)}`;
             const notePrefix = reason ? `${reason} - ` : '';
 
-            // Mouvement sortie au POS source
+            // Déduire le stock source immédiatement (réservé pour transfert)
+            const newSourceStock = sourceStock - qty;
+            CORE.setProductStock(productId, sourcePosId, newSourceStock);
+
+            // NE PAS ajouter le stock au POS destination — c'est le gestionnaire qui confirme la réception
+
+            // Mouvement sortie au POS source (réservation)
             CORE.recordStockMovement({
                 productId: productId,
                 type: 'out',
                 qty: qty,
                 ref: transferRef,
-                note: `${notePrefix}Transfert vers ${destPos.name}`,
+                note: `${notePrefix}Transfert en attente vers ${destPos.name}`,
                 posId: sourcePosId
             });
 
-            // Mouvement entrée au POS destination
-            CORE.recordStockMovement({
-                productId: productId,
-                type: 'in',
-                qty: qty,
-                ref: transferRef,
-                note: `${notePrefix}Transfert depuis ${sourcePos.name}`,
-                posId: destPosId
-            });
-
-            // Créer un enregistrement stockTransfers pour traçabilité
+            // Créer le transfert avec status 'pending'
             CORE.db.stockTransfers = CORE.db.stockTransfers || [];
             CORE.db.stockTransfers.push({
                 id: transferRef,
@@ -44381,21 +44389,36 @@ Rapport généré par le système d'IA de gestion du stock
                 destPosId: destPosId,
                 destPosName: destPos.name,
                 reason: reason || 'Transfert inter-POS (Manager)',
-                status: 'accepted', // Manager = transfert direct, pas besoin de confirmation
+                status: 'pending', // En attente de confirmation par le gestionnaire destinataire
                 createdBy: CORE.state.currentUser?.id,
                 createdByName: CORE.state.currentUser?.name || 'Manager',
                 createdAt: new Date().toISOString(),
-                receivedAt: new Date().toISOString(),
-                receivedBy: 'auto',
-                receivedByName: 'Transfert direct (Manager)'
+                receivedAt: null,
+                receivedBy: null,
+                receivedByName: null
+            });
+
+            // Créer une notification pour le POS destinataire
+            CORE.db.notifications = CORE.db.notifications || [];
+            CORE.db.notifications.push({
+                id: 'NOTIF-' + CORE.uid(),
+                type: 'transfer_incoming',
+                title: '📦 Transfert entrant',
+                message: `${qty} x ${product.name} en provenance de ${sourcePos.name}`,
+                details: `Envoyé par ${CORE.state.currentUser?.name || 'Manager'}`,
+                transferId: transferRef,
+                posId: destPosId,
+                createdAt: new Date().toISOString(),
+                read: false
             });
 
             CORE.markDirty('products');
             CORE.markDirty('stockMovements');
             CORE.markDirty('stockTransfers');
+            CORE.markDirty('notifications');
             CORE.save(true);
             UI.closeModal();
-            UI.toast(`✓ ${qty} ${product.name} transféré(s) de ${sourcePos.name} à ${destPos.name}`, 'success');
+            UI.toast(`📤 Transfert envoyé! ${qty} ${product.name} en attente de réception par ${destPos.name}`, 'success');
             App.rerender();
         },
 
@@ -49673,7 +49696,9 @@ Rapport généré par le système d'IA de gestion du stock
             const openIncidents = (CORE.db.incidents || []).filter(i => !i.resolved && i.posId === posId);
             const urgentIncidents = openIncidents.filter(i => i.priority === 'high' || i.priority === 'critical');
 
-            const pendingTransfers = (CORE.db.transferReceipts || []).filter(t => t.status === 'pending' && t.toPosId === posId);
+            const pendingTransfersReceipts = (CORE.db.transferReceipts || []).filter(t => t.status === 'pending' && String(t.toPosId) === String(posId));
+            const pendingTransfersStock = (CORE.db.stockTransfers || []).filter(t => t.status === 'pending' && (String(t.destPosId) === String(posId) || String(t.sourcePosId) === String(posId)));
+            const pendingTransfersTotal = pendingTransfersReceipts.length + pendingTransfersStock.length;
 
             // === ALERTES PRIORITAIRES ===
             const alerts = [];
@@ -49682,7 +49707,7 @@ Rapport généré par le système d'IA de gestion du stock
             if (outOfStock.length > 0) alerts.push({ type: 'warning', icon: '📦', text: `${outOfStock.length} produit(s) en rupture de stock`, action: 'ManagerModule.showOutOfStockModal()' });
             if (pendingDeliveries.length > 5) alerts.push({ type: 'warning', icon: '⏳', text: `${pendingDeliveries.length} livraisons en attente d'assignation`, action: 'ManagerModule.showQuickAssignModal()' });
             if (freeLivreurs.length === 0 && pendingDeliveries.length > 0) alerts.push({ type: 'warning', icon: '👷', text: 'Tous les livreurs sont occupés!', action: null });
-            if (pendingTransfers.length > 0) alerts.push({ type: 'info', icon: '📥', text: `${pendingTransfers.length} transfert(s) de stock à réceptionner`, action: 'ManagerModule.showPendingTransfersModal()' });
+            if (pendingTransfersTotal > 0) alerts.push({ type: 'info', icon: '📥', text: `${pendingTransfersTotal} transfert(s) de stock en attente`, action: 'ManagerModule.showPendingTransfersModal()' });
 
             // === TÂCHES DU JOUR ===
             const tasks = this.getDailyTasks();
@@ -50333,23 +50358,80 @@ Rapport généré par le système d'IA de gestion du stock
 
         showPendingTransfersModal() {
             const posId = CORE.state.currentUser?.pos;
-            const transfers = (CORE.db.transferReceipts || []).filter(t => t.status === 'pending' && t.toPosId === posId);
+            // Transferts inter-POS entrants (stockTransfers)
+            const incomingTransfers = (CORE.db.stockTransfers || []).filter(t =>
+                t.status === 'pending' && String(t.destPosId) === String(posId)
+            );
+            // Transferts inter-POS sortants encore en attente
+            const outgoingTransfers = (CORE.db.stockTransfers || []).filter(t =>
+                t.status === 'pending' && String(t.sourcePosId) === String(posId)
+            );
+            // Transferts depot (transferReceipts)
+            const depotTransfers = (CORE.db.transferReceipts || []).filter(t =>
+                t.status === 'pending' && String(t.toPosId) === String(posId)
+            );
 
-            UI.modal('📥 Transferts à réceptionner', `
-                <div class="space-y-3 max-h-96 overflow-y-auto">
-                    ${transfers.map(t => `
-                        <div class="p-4 bg-blue-50 border border-blue-200 rounded-xl">
-                            <div class="flex justify-between items-start mb-2">
-                                <div>
-                                    <div class="font-black text-blue-900">${t.id}</div>
-                                    <div class="text-sm text-blue-700">De: ${CORE.getPOS(t.fromPosId)?.name || 'Dépôt'}</div>
-                                </div>
-                                <div class="text-xs text-blue-600">${new Date(t.createdAt).toLocaleDateString('fr-FR')}</div>
-                            </div>
-                            <div class="text-sm text-blue-800">${(t.items || []).length} produit(s)</div>
+            UI.modal('📦 Transferts en attente', `
+                <div class="space-y-5 max-h-[80vh] overflow-y-auto">
+                    <!-- Entrants -->
+                    <div class="bg-white rounded-2xl border border-emerald-200 p-4">
+                        <div class="flex items-center gap-2 mb-3">
+                            <span class="text-lg">📥</span>
+                            <span class="font-black text-slate-900">Transferts entrants à réceptionner</span>
+                            <span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-black">${incomingTransfers.length + depotTransfers.length}</span>
                         </div>
-                    `).join('')}
-                    ${transfers.length === 0 ? '<div class="text-center py-6 text-slate-400">Aucun transfert en attente</div>' : ''}
+                        ${incomingTransfers.length === 0 && depotTransfers.length === 0 ? '<div class="text-center py-4 text-slate-400 text-sm">Aucun transfert entrant en attente</div>' : ''}
+                        ${incomingTransfers.map(t => `
+                            <div class="p-3 bg-emerald-50 border border-emerald-200 rounded-xl mb-2">
+                                <div class="flex justify-between items-start">
+                                    <div>
+                                        <div class="font-black text-emerald-900">${t.productName || 'Produit'}</div>
+                                        <div class="text-sm text-emerald-700">De: ${t.sourcePosName || 'POS'} • ${t.qty} unité(s)</div>
+                                        <div class="text-xs text-emerald-600 mt-1">${t.reason || ''}</div>
+                                    </div>
+                                    <div class="text-right">
+                                        <div class="text-xs text-emerald-500">${new Date(t.createdAt).toLocaleDateString('fr-FR')}</div>
+                                        <span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-bold">EN ATTENTE</span>
+                                    </div>
+                                </div>
+                            </div>
+                        `).join('')}
+                        ${depotTransfers.map(t => `
+                            <div class="p-3 bg-blue-50 border border-blue-200 rounded-xl mb-2">
+                                <div class="flex justify-between items-start">
+                                    <div>
+                                        <div class="font-black text-blue-900">${t.productName || t.id}</div>
+                                        <div class="text-sm text-blue-700">De: ${t.fromPosName || 'Dépôt'} • ${t.quantity || 0} unité(s)</div>
+                                    </div>
+                                    <div class="text-xs text-blue-500">${new Date(t.createdAt).toLocaleDateString('fr-FR')}</div>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <!-- Sortants -->
+                    <div class="bg-white rounded-2xl border border-orange-200 p-4">
+                        <div class="flex items-center gap-2 mb-3">
+                            <span class="text-lg">📤</span>
+                            <span class="font-black text-slate-900">Transferts envoyés (en attente de réception)</span>
+                            <span class="px-2 py-0.5 bg-orange-100 text-orange-700 rounded-full text-xs font-black">${outgoingTransfers.length}</span>
+                        </div>
+                        ${outgoingTransfers.length === 0 ? '<div class="text-center py-4 text-slate-400 text-sm">Aucun transfert sortant en attente</div>' : ''}
+                        ${outgoingTransfers.map(t => `
+                            <div class="p-3 bg-orange-50 border border-orange-200 rounded-xl mb-2">
+                                <div class="flex justify-between items-start">
+                                    <div>
+                                        <div class="font-black text-orange-900">${t.productName || 'Produit'}</div>
+                                        <div class="text-sm text-orange-700">Vers: ${t.destPosName || 'POS'} • ${t.qty} unité(s)</div>
+                                        <div class="text-xs text-orange-600 mt-1">Envoyé par ${t.createdByName || 'Manager'}</div>
+                                    </div>
+                                    <div class="text-right">
+                                        <div class="text-xs text-orange-500">${new Date(t.createdAt).toLocaleDateString('fr-FR')}</div>
+                                        <span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-bold">EN ATTENTE</span>
+                                    </div>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
                 </div>
             `, [{ label: 'Fermer', onclick: 'UI.closeModal()' }]);
         },
