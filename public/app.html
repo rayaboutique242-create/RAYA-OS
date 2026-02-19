@@ -61744,8 +61744,10 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     }
                 }
                 // P7: Filter out items with non-UUID IDs (integer IDs crash PostgreSQL UUID columns)
+                // NOTE: Only filter collections that are stored in PostgreSQL tables with UUID primary keys.
+                // stockMovements, stockTransfers, transferReceipts are stored as JSON blobs in tenant_data — no UUID filtering needed.
                 var _isUUID2 = function(v) { return typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v); };
-                var uuidCols2 = ['products', 'orders', 'clients', 'categories', 'stores', 'stockMovements', 'deliveries', 'returns'];
+                var uuidCols2 = ['products', 'orders', 'clients', 'categories', 'stores', 'deliveries', 'returns'];
                 for (var uc2 = 0; uc2 < uuidCols2.length; uc2++) {
                     var ucol2 = uuidCols2[uc2];
                     if (collections[ucol2] && Array.isArray(collections[ucol2])) {
