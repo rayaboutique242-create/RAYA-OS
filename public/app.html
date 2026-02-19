@@ -46376,11 +46376,6 @@ Rapport généré par le système d'IA de gestion du stock
             ]);
         },
 
-        // P2-9: Delegate to ManagerModule (single source of truth — avoids 40-line duplication)
-        productBelongsToPos(product, posId) {
-            return ManagerModule.productBelongsToPos(product, posId);
-        },
-
         renderInventory(options = {}) {
             const { forcePosId = null, hidePosSelector = false } = options;
             const tab = this.state.inventoryTab;
@@ -48646,22 +48641,7 @@ Rapport généré par le système d'IA de gestion du stock
             }, 500);
         },
 
-        updateTeamSearch(value) {
-            this.state.teamSearch = value;
-            if (this.teamSearchTimer) clearTimeout(this.teamSearchTimer);
-            this.teamSearchTimer = setTimeout(() => {
-                const input = document.getElementById('manager-team-search-input');
-                const cursorPos = input?.selectionStart || 0;
-                App.rerender();
-                setTimeout(() => {
-                    const newInput = document.getElementById('manager-team-search-input');
-                    if (newInput) {
-                        newInput.focus();
-                        newInput.setSelectionRange(cursorPos, cursorPos);
-                    }
-                }, 0);
-            }, 500);
-        },
+        // [Dead duplicate updateTeamSearch removed — first version with teamPage reset is used]
 
         roleLabel(role) {
             const map = { gestionnaire: 'Gestionnaire', vendeur: 'Vendeur', livreur: 'Livreur' };
@@ -49001,108 +48981,7 @@ Rapport généré par le système d'IA de gestion du stock
             App.rerender();
         },
 
-        renderTeam() {
-            const users = this.getTeamFiltered();
-            const roleOptions = [
-                { value: 'all', label: 'Tous' },
-                { value: 'gestionnaire', label: 'Gestionnaires' },
-                { value: 'vendeur', label: 'Vendeurs' },
-                { value: 'livreur', label: 'Livreurs' }
-            ];
-
-            const countBy = (r) => CORE.getVisibleUsers().filter(u => u.role === r).length;
-
-            return `
-                <div class="fade-in max-w-7xl mx-auto space-y-6">
-                    <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
-                        <div>
-                            <h2 class="text-2xl font-black text-slate-900">Comptes & RH</h2>
-                            <p class="text-slate-500 font-medium">Gérez les gestionnaires, vendeurs et livreurs.</p>
-                        </div>
-                        <div class="flex flex-wrap gap-2">
-                            <button onclick="ManagerModule.showNewUserModal()" class="px-4 py-2.5 bg-sky-600 text-white font-black rounded-xl hover:bg-sky-700 transition">Nouveau compte</button>
-                            <button onclick="PDGModule.showInviteEmployeeModal()" class="px-4 py-2.5 bg-purple-600 text-white font-black rounded-xl hover:bg-purple-700 transition flex items-center gap-2">
-                                <i data-lucide="mail-plus" class="w-4 h-4"></i> Inviter
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <div class="bg-white p-6 rounded-3xl border border-slate-200">
-                            <div class="text-xs font-black text-slate-500 uppercase tracking-wider">Gestionnaires</div>
-                            <div class="mt-2 text-3xl font-black text-slate-900">${countBy('gestionnaire')}</div>
-                        </div>
-                        <div class="bg-white p-6 rounded-3xl border border-slate-200">
-                            <div class="text-xs font-black text-slate-500 uppercase tracking-wider">Vendeurs</div>
-                            <div class="mt-2 text-3xl font-black text-slate-900">${countBy('vendeur')}</div>
-                        </div>
-                        <div class="bg-white p-6 rounded-3xl border border-slate-200">
-                            <div class="text-xs font-black text-slate-500 uppercase tracking-wider">Livreurs</div>
-                            <div class="mt-2 text-3xl font-black text-slate-900">${countBy('livreur')}</div>
-                        </div>
-                    </div>
-
-                    <div class="bg-white rounded-3xl border border-slate-200 overflow-hidden">
-                        <div class="p-4 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
-                            <div class="flex items-center gap-2">
-                                <select onchange="ManagerModule.state.teamRole=this.value;App.rerender()" class="px-3 py-2.5 rounded-xl border border-slate-200 bg-white font-bold">
-                                    ${roleOptions.map(o => `<option value="${o.value}" ${o.value===this.state.teamRole?'selected':''}>${o.label}</option>`).join('')}
-                                </select>
-                            </div>
-                            <div class="relative">
-                                <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-                                <input id="manager-team-search-input" type="text" value="${this.state.teamSearch}" onkeyup="ManagerModule.updateTeamSearch(this.value)" placeholder="Nom, téléphone, id..." class="pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-white font-medium w-[320px] max-w-full" style="direction: ltr; text-align: left;" autocomplete="off">
-                            </div>
-                        </div>
-
-                        <div class="overflow-auto">
-                            <table class="w-full text-left min-w-[1050px]">
-                                <thead class="bg-slate-50 text-xs font-black text-slate-400 uppercase tracking-wider">
-                                    <tr>
-                                        <th class="px-6 py-4">Utilisateur</th>
-                                        <th class="px-6 py-4">Rôle</th>
-                                        <th class="px-6 py-4">Ville / POS</th>
-                                        <th class="px-6 py-4">Téléphone</th>
-                                        <th class="px-6 py-4">Statut</th>
-                                        <th class="px-6 py-4 text-right">Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody class="divide-y divide-slate-50">
-                                    ${users.length === 0 ? `<tr><td colspan="6" class="px-6 py-12 text-center text-slate-400 font-medium">Aucun compte</td></tr>` : ''}
-                                    ${users.map(u => {
-                                        const roleColor = u.role==='livreur'?'gradient-livreur':u.role==='vendeur'?'gradient-vendeur':'gradient-gestionnaire';
-                                        const city = u.city ? CORE.getCity(u.city)?.name : '—';
-                                        const pos = u.pos ? CORE.getPOS(u.pos)?.name : '—';
-                                        return `
-                                        <tr class="hover:bg-slate-50">
-                                            <td class="px-6 py-4">
-                                                <div class="flex items-center gap-3">
-                                                    <div class="w-10 h-10 rounded-2xl ${roleColor} text-white flex items-center justify-center font-black">${u.avatar || (u.name||'?').slice(0,2).toUpperCase()}</div>
-                                                    <div>
-                                                        <div class="font-black text-slate-900">${u.name}</div>
-                                                        <div class="text-[10px] text-slate-400">#${u.id}</div>
-                                                    </div>
-                                                </div>
-                                            </td>
-                                            <td class="px-6 py-4 font-black text-slate-900">${this.roleLabel(u.role)}</td>
-                                            <td class="px-6 py-4 text-sm text-slate-600">${city} • ${pos}</td>
-                                            <td class="px-6 py-4 text-sm font-bold text-slate-700">${u.phone || '—'}</td>
-                                            <td class="px-6 py-4">${u.active ? UI.badge('Actif','emerald') : UI.badge('Inactif','slate')}</td>
-                                            <td class="px-6 py-4 text-right">
-                                                <div class="flex items-center justify-end gap-2">
-                                                    <button onclick="ManagerModule.showEditUserModal(${u.id})" class="px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-black hover:bg-slate-50">Éditer</button>
-                                                    <button onclick="ManagerModule.toggleUserActive(${u.id})" class="px-3 py-2 rounded-xl ${u.active ? 'bg-slate-100 text-slate-700 hover:bg-slate-200' : 'bg-emerald-600 text-white hover:bg-emerald-700'} text-xs font-black transition">${u.active ? 'Désactiver' : 'Activer'}</button>
-                                                </div>
-                                            </td>
-                                        </tr>`;
-                                    }).join('')}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            `;
-        },
+        // [Dead duplicate renderTeam removed — was overriding the real version below]
 
         renderTeam() {
             const users = this.getTeamFiltered();
