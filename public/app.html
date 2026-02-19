@@ -30184,7 +30184,27 @@ Rapport généré par le système d'IA de gestion du stock
             ).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         },
 
-        showPendingTransfersModal() {
+        async showPendingTransfersModal() {
+            // CRITICAL FIX: Pull stockTransfers from cloud BEFORE displaying
+            // Without this, the gestionnaire only sees data from the last full sync (~25 min)
+            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                try {
+                    UI.toast('Chargement des transferts...', 'info', 2000);
+                    const fresh = await API.request('/sync/stockTransfers?light=1', { method: 'GET', timeout: 8000 });
+                    if (fresh && Array.isArray(fresh.data)) {
+                        CORE.db.stockTransfers = API._smartMerge(CORE.db.stockTransfers || [], fresh.data);
+                        CORE.save();
+                        console.log('[TRANSFERS] Pulled ' + fresh.data.length + ' stockTransfers from cloud');
+                    }
+                    // Also pull notifications (transfer_incoming)
+                    const freshNotif = await API.request('/sync/notifications?light=1', { method: 'GET', timeout: 8000 });
+                    if (freshNotif && Array.isArray(freshNotif.data)) {
+                        CORE.db.notifications = API._smartMerge(CORE.db.notifications || [], freshNotif.data);
+                    }
+                } catch(e) {
+                    console.warn('[TRANSFERS] Cloud pull failed, using cached data:', e.message);
+                }
+            }
             const incoming = this.getPendingIncomingTransfers();
             const outgoing = this.getPendingOutgoingTransfers();
             const currentPosName = CORE.getPOS(CORE.state.currentUser?.pos)?.name || 'Mon POS';
@@ -50358,7 +50378,20 @@ Rapport généré par le système d'IA de gestion du stock
             });
         },
 
-        showPendingTransfersModal() {
+        async showPendingTransfersModal() {
+            // Pull fresh transfer data from cloud before displaying
+            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                try {
+                    UI.toast('Chargement des transferts...', 'info', 2000);
+                    const fresh = await API.request('/sync/stockTransfers?light=1', { method: 'GET', timeout: 8000 });
+                    if (fresh && Array.isArray(fresh.data)) {
+                        CORE.db.stockTransfers = API._smartMerge(CORE.db.stockTransfers || [], fresh.data);
+                        CORE.save();
+                    }
+                } catch(e) {
+                    console.warn('[TRANSFERS] Manager cloud pull failed:', e.message);
+                }
+            }
             const posId = CORE.state.currentUser?.pos;
             // Transferts inter-POS entrants (stockTransfers)
             const incomingTransfers = (CORE.db.stockTransfers || []).filter(t =>
@@ -62079,6 +62112,41 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             return item.updatedAt || item.createdAt || item._mergedAt || null;
         },
 
+        /**
+         * Pull only critical collections (stockTransfers, notifications) from cloud.
+         * Used during light sync and idle cycles so incoming transfers appear within ~5 min
+         * instead of waiting for a full sync (~25 min).
+         * @returns {Promise<boolean>} true if any data was merged
+         */
+        async _pullCriticalCollections() {
+            if (!this.isAuthenticated() || !navigator.onLine) return false;
+            var criticalCols = ['stockTransfers', 'notifications'];
+            var merged = false;
+            for (var ci = 0; ci < criticalCols.length; ci++) {
+                var col = criticalCols[ci];
+                try {
+                    var resp = await this.request('/sync/' + col + '?light=1', { method: 'GET', timeout: 8000 });
+                    if (resp && Array.isArray(resp.data) && resp.data.length > 0) {
+                        var localArr = CORE.db[col];
+                        if (!Array.isArray(localArr)) {
+                            CORE.db[col] = resp.data;
+                        } else {
+                            CORE.db[col] = this._smartMerge(localArr, resp.data);
+                        }
+                        if (typeof resp.version === 'number') {
+                            this.updateCloudVersions({ [col]: resp.version });
+                        }
+                        merged = true;
+                        console.log('[SYNC-CRITICAL] ' + col + ': ' + resp.data.length + ' items merged');
+                    }
+                } catch(e) {
+                    console.warn('[SYNC-CRITICAL] Pull ' + col + ' failed:', e.message);
+                }
+            }
+            if (merged) CORE.save();
+            return merged;
+        },
+
         /** Pull ALL collections from /sync endpoint into CORE.db
          *  @param {boolean} force - bypass cooldown (used by full sync)
          */
@@ -62641,13 +62709,15 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                             CORE._isSyncing = false;
                         });
                     } else if (CORE.hasDirty()) {
-                        // Light sync: push dirty only (no pull — pull happens in full sync).
-                        // PERF: Removed syncEvents + syncAllFromCloud from light sync to reduce requests.
+                        // Light sync: push dirty + pull critical collections (stockTransfers, notifications).
                         var dirtyCount = CORE.getDirtyCollections().length;
                         console.log('[SYNC] Light sync (#' + App._syncCycleCount + ', ' + dirtyCount + ' dirty)...');
                         if (typeof SyncIndicator !== 'undefined') SyncIndicator.show('syncing', dirtyCount + ' collection(s)...');
                         var _lt0 = performance.now();
-                        API.syncDirtyToCloud().then(function() {
+                        // FIX: Also pull critical collections so incoming transfers appear promptly
+                        API._pullCriticalCollections().then(function() {
+                            return API.syncDirtyToCloud();
+                        }).then(function() {
                             console.log('[SYNC] ✅ Light sync complete in ' + (performance.now() - _lt0).toFixed(0) + 'ms');
                             if (typeof SyncIndicator !== 'undefined') SyncIndicator.show('success', 'Sync OK');
                             App._syncFailures = 0;
@@ -62659,9 +62729,15 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                             CORE._isSyncing = false;
                         });
                     } else {
-                        // Nothing dirty, nothing to do — just release the lock.
-                        // PERF: Removed syncEvents call when idle (saves 1 request/cycle).
-                        CORE._isSyncing = false;
+                        // No dirty data — still pull critical collections for incoming transfers/notifications.
+                        var _idleT0 = performance.now();
+                        API._pullCriticalCollections().then(function(pulled) {
+                            if (pulled) {
+                                console.log('[SYNC] Idle pull of critical collections in ' + (performance.now() - _idleT0).toFixed(0) + 'ms');
+                                App.rerender();
+                            }
+                            CORE._isSyncing = false;
+                        }).catch(function() { CORE._isSyncing = false; });
                     }
                     }); // end refreshPromise.then
                 }
