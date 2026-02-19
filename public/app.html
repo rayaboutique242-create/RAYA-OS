@@ -6589,6 +6589,11 @@ select.form-input { cursor: pointer; }
             const status = movement.status || 'completed';
             const meta = movement.meta ? { ...movement.meta } : null;
             const direction = movement.direction || meta?.direction || null;
+            const resolvedQty = movement.quantity ?? movement.qty ?? 0;
+            const resolvedNote = movement.notes || movement.note || '';
+            const resolvedRef = movement.document || movement.ref || null;
+            const now = new Date().toISOString();
+            const resolvedTimestamp = movement.timestamp || now;
 
             const movementRecord = {
                 id: 'MOV-' + new Date().getTime(),
@@ -6596,7 +6601,9 @@ select.form-input { cursor: pointer; }
                 productId: movement.productId,
                 productName: product.name,
                 productSku: product.barcode || 'N/A',
-                quantity: movement.quantity,
+                // Store BOTH property names so all display functions work
+                quantity: resolvedQty,
+                qty: resolvedQty,
                 posId: movement.posId !== undefined ? movement.posId : user.pos, // POS source
                 fromPosId: movement.fromPosId || null, // Pour les transferts
                 fromPosName: fromPos?.name || null,
@@ -6605,16 +6612,21 @@ select.form-input { cursor: pointer; }
                 userId: user.id,
                 userName: user.name,
                 userRole: user.role,
-                timestamp: movement.timestamp || new Date().toISOString(),
-                notes: movement.notes || '',
+                // Store all date aliases
+                timestamp: resolvedTimestamp,
+                createdAt: now,
+                date: now,
+                notes: resolvedNote,
+                note: resolvedNote,
                 reason: movement.reason || '', // 'transfer_request', 'manual_adjustment', 'sale', 'return', 'restock'
                 status: status, // 'completed', 'pending', 'cancelled'
                 direction: direction,
                 oldStock: oldStock,
                 newStock: newStock,
                 unitPrice: movement.unitPrice || product.price,
-                totalValue: (movement.unitPrice || product.price || 0) * movement.quantity,
-                document: movement.document || null, // référence à commande, retour, etc.
+                totalValue: (movement.unitPrice || product.price || 0) * resolvedQty,
+                document: resolvedRef, // référence à commande, retour, etc.
+                ref: resolvedRef,
                 meta: meta
             };
 
@@ -6623,7 +6635,7 @@ select.form-input { cursor: pointer; }
             // Log d'audit
             this.logActivity('create', 'stock_movement', movementRecord.id, {
                 entityName: `Mouvement stock: ${product.name}`,
-                description: `${movement.type}: ${movement.quantity} unités (${oldStock} → ${newStock})`,
+                description: `${movement.type}: ${resolvedQty} unités (${oldStock} → ${newStock})`,
                 details: movementRecord
             });
 
@@ -9359,7 +9371,7 @@ select.form-input { cursor: pointer; }
             UI.toast(message, toastType);
         },
 
-        recordStockMovement({ productId, type, qty, note, ref, posId = null, fromPosId = null, toPosId = null, meta = {}, quantity = null, userId = null, userName = null }) {
+        recordStockMovement({ productId, type, qty, note, ref, posId = null, fromPosId = null, toPosId = null, meta = {}, quantity = null, userId = null, userName = null, notes = null, reason = null, document = null, timestamp = null, direction = null }) {
             if (!productId) return null;
 
             const product = this.getProduct(productId);
@@ -9367,21 +9379,33 @@ select.form-input { cursor: pointer; }
             const resolvedQty = Number((qty !== undefined && qty !== null) ? qty : (quantity !== undefined && quantity !== null ? quantity : 0));
             const effectiveQty = Number.isFinite(resolvedQty) ? resolvedQty : 0;
             const effectivePosId = (posId !== undefined && posId !== null) ? posId : (currentUser.pos ?? null);
+            const effectiveNote = note || notes || reason || null;
+            const effectiveRef = ref || document || null;
+            const now = new Date().toISOString();
 
             const movement = {
                 id: CORE.uid(),
                 productId,
                 productName: product?.name || '—',
                 type: type || 'adjust',
+                // Store BOTH property names so all display functions work
                 qty: effectiveQty,
-                ref: ref || null,
-                note: note || null,
+                quantity: effectiveQty,
+                ref: effectiveRef,
+                document: effectiveRef,
+                note: effectiveNote,
+                notes: effectiveNote,
+                reason: reason || null,
                 userId: userId !== null && userId !== undefined ? userId : (currentUser.id ?? null),
                 userName: userName || currentUser.name || 'System',
-                createdAt: new Date().toISOString(),
+                // Store all date aliases
+                createdAt: now,
+                timestamp: timestamp || now,
+                date: now,
                 posId: effectivePosId,
                 fromPosId: fromPosId ?? null,
                 toPosId: toPosId ?? null,
+                direction: direction || (meta?.direction) || null,
                 meta: meta || {}
             };
 
@@ -28245,17 +28269,23 @@ Rapport généré par le système d'IA de gestion du stock
                                 </thead>
                                 <tbody class="divide-y divide-slate-50">
                                     ${lastMov.length === 0 ? `<tr><td colspan="4" class="px-6 py-10 text-center text-slate-400 italic">Aucun mouvement enregistré</td></tr>` : ''}
-                                    ${lastMov.map(m => `
+                                    ${lastMov.map(m => {
+                                        const mQty = m.qty ?? m.quantity ?? 0;
+                                        const mDate = m.createdAt || m.timestamp || m.date;
+                                        const mRef = m.ref || m.document || '';
+                                        const typeMap = { 'in': 'Entrée', 'out': 'Sortie', 'adjust': 'Ajustement', 'transfer': 'Transfert', 'main_depot_transfer': 'Transfert dépôt' };
+                                        const typeLabel = typeMap[m.type] || m.type || '—';
+                                        return `
                                         <tr class="hover:bg-slate-50">
                                             <td class="px-6 py-4">
                                                 <div class="font-black text-slate-900">${m.productName || '—'}</div>
-                                                <div class="text-[10px] text-slate-400">${m.ref || ''}</div>
+                                                <div class="text-[10px] text-slate-400">${mRef}</div>
                                             </td>
-                                            <td class="px-6 py-4">${UI.badge(m.type, m.type==='out'?'red':m.type==='in'?'emerald':'blue')}</td>
-                                            <td class="px-6 py-4 text-right font-black ${m.type==='out'?'text-red-600':'text-slate-900'}">${m.type==='out' ? '-' : '+'}${m.qty}</td>
-                                            <td class="px-6 py-4 text-right text-xs text-slate-500">${CORE.formatDate(m.createdAt)}</td>
+                                            <td class="px-6 py-4">${UI.badge(typeLabel, m.type==='out'?'red':m.type==='in'?'emerald':'blue')}</td>
+                                            <td class="px-6 py-4 text-right font-black ${m.type==='out'?'text-red-600':'text-slate-900'}">${m.type==='out' ? '-' : '+'}${mQty}</td>
+                                            <td class="px-6 py-4 text-right text-xs text-slate-500">${CORE.formatDate(mDate)}</td>
                                         </tr>
-                                    `).join('')}
+                                    `; }).join('')}
                                 </tbody>
                             </table>
                         </div>
@@ -28366,8 +28396,12 @@ Rapport généré par le système d'IA de gestion du stock
             // Mouvements récents (dernières 24h)
             const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
             const recentMovements = CORE.getVisibleStockMovements()
-                .filter(m => m.posId == posId && m.createdAt >= yesterday)
-                .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+                .filter(m => {
+                    if (String(m.posId) !== String(posId)) return false;
+                    const mDate = m.createdAt || m.timestamp || m.date || '';
+                    return mDate >= yesterday;
+                })
+                .sort((a, b) => new Date(b.createdAt || b.timestamp || b.date || 0) - new Date(a.createdAt || a.timestamp || a.date || 0))
                 .slice(0, 10);
 
             // Produits les plus critiques
@@ -28700,18 +28734,21 @@ Rapport généré par le système d'IA de gestion du stock
                                     <div class="text-sm">Aucun mouvement récent</div>
                                 </div>
                                 ` : recentMovements.map(m => {
-                                    const isIn = m.type === 'in';
+                                    const isIn = m.type === 'in' || m.type === 'main_depot_transfer';
                                     const isOut = m.type === 'out';
+                                    const mQty = m.qty ?? m.quantity ?? 0;
+                                    const mDate = m.createdAt || m.timestamp || m.date;
+                                    const mNote = m.ref || m.document || m.note || m.notes || '—';
                                     return `
                                     <div class="flex items-center gap-3 p-3 rounded-xl ${isIn ? 'bg-emerald-50' : isOut ? 'bg-red-50' : 'bg-blue-50'} transition hover:shadow-sm">
                                         <div class="w-10 h-10 ${isIn ? 'bg-emerald-200 text-emerald-700' : isOut ? 'bg-red-200 text-red-700' : 'bg-blue-200 text-blue-700'} rounded-xl flex items-center justify-center font-black text-sm">
-                                            ${isIn ? '+' : isOut ? '-' : '±'}${m.qty}
+                                            ${isIn ? '+' : isOut ? '-' : '±'}${mQty}
                                         </div>
                                         <div class="flex-1 min-w-0">
                                             <div class="font-bold text-slate-900 truncate">${m.productName || 'Produit #' + m.productId}</div>
-                                            <div class="text-xs text-slate-500">${m.ref || m.note || '—'}</div>
+                                            <div class="text-xs text-slate-500">${mNote}</div>
                                         </div>
-                                        <div class="text-xs text-slate-400">${new Date(m.createdAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}</div>
+                                        <div class="text-xs text-slate-400">${mDate ? new Date(mDate).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : '—'}</div>
                                     </div>
                                     `;
                                 }).join('')}
@@ -31104,9 +31141,13 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         showStockHistory() {
-            const movements = CORE.getVisibleStockMovements().filter(m => m.posId === CORE.state.currentUser?.pos);
-            const recent = movements.sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 30);
+            const userPos = CORE.state.currentUser?.pos;
+            const movements = CORE.getVisibleStockMovements().filter(m => String(m.posId) === String(userPos));
+            const recent = movements.sort((a, b) => new Date(b.createdAt || b.timestamp || b.date || 0) - new Date(a.createdAt || a.timestamp || a.date || 0)).slice(0, 30);
             const products = CORE.getVisibleProducts() || [];
+
+            // Map type codes to human-readable labels
+            const typeLabels = { 'in': 'Entrée', 'out': 'Sortie', 'adjust': 'Ajustement', 'transfer': 'Transfert', 'main_depot_transfer': 'Transfert dépôt' };
 
             UI.modal('📜 Historique des Mouvements', `
                 <div class="space-y-4">
@@ -31123,18 +31164,25 @@ Rapport généré par le système d'IA de gestion du stock
                         <div class="space-y-2 max-h-[60vh] overflow-y-auto">
                             ${recent.map(m => {
                                 const product = products.find(p => p.id === m.productId);
-                                const isIn = m.type === 'in';
+                                const isIn = m.type === 'in' || (m.type === 'transfer' && m.direction === 'in') || (m.type === 'main_depot_transfer');
+                                const isOut = m.type === 'out' || (m.type === 'transfer' && m.direction === 'out');
+                                const mQty = m.qty ?? m.quantity ?? 0;
+                                const mNote = m.note || m.notes || m.reason || '';
+                                const mDate = m.createdAt || m.timestamp || m.date;
+                                const dateStr = mDate ? new Date(mDate).toLocaleDateString('fr-FR') : '—';
+                                const typeLabel = typeLabels[m.type] || m.type || 'Mouvement';
+                                const noteDisplay = mNote ? mNote : typeLabel;
                                 return `
                                 <div class="flex items-center gap-3 p-3 bg-white border border-slate-200 rounded-xl">
-                                    <div class="w-8 h-8 ${isIn ? 'bg-emerald-100' : 'bg-red-100'} rounded-lg flex items-center justify-center">
-                                        <i data-lucide="${isIn ? 'arrow-down' : 'arrow-up'}" class="w-4 h-4 ${isIn ? 'text-emerald-600' : 'text-red-600'}"></i>
+                                    <div class="w-8 h-8 ${isIn ? 'bg-emerald-100' : isOut ? 'bg-red-100' : 'bg-blue-100'} rounded-lg flex items-center justify-center">
+                                        <i data-lucide="${isIn ? 'arrow-down' : isOut ? 'arrow-up' : 'repeat'}" class="w-4 h-4 ${isIn ? 'text-emerald-600' : isOut ? 'text-red-600' : 'text-blue-600'}"></i>
                                     </div>
                                     <div class="flex-1">
-                                        <div class="font-bold text-slate-900">${product?.name || 'Produit #' + m.productId}</div>
-                                        <div class="text-xs text-slate-500">${m.note || 'Mouvement'} • ${new Date(m.date).toLocaleDateString('fr-FR')}</div>
+                                        <div class="font-bold text-slate-900">${product?.name || m.productName || 'Produit #' + m.productId}</div>
+                                        <div class="text-xs text-slate-500">${noteDisplay} • ${dateStr}</div>
                                     </div>
                                     <div class="text-right">
-                                        <div class="font-black ${isIn ? 'text-emerald-600' : 'text-red-600'}">${isIn ? '+' : '-'}${m.quantity}</div>
+                                        <div class="font-black ${isIn ? 'text-emerald-600' : isOut ? 'text-red-600' : 'text-blue-600'}">${isIn ? '+' : isOut ? '-' : '±'}${mQty}</div>
                                     </div>
                                 </div>
                                 `;
@@ -46703,8 +46751,11 @@ Rapport généré par le système d'IA de gestion du stock
             // Mouvements récents (7 derniers jours)
             const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
             const recentMovements = CORE.getVisibleStockMovements()
-                .filter(m => hasMainWarehouseProducts ? (m.isMainWarehouse && new Date(m.createdAt) >= sevenDaysAgo) : (new Date(m.createdAt) >= sevenDaysAgo))
-                .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+                .filter(m => {
+                    const mDate = new Date(m.createdAt || m.timestamp || m.date || 0);
+                    return hasMainWarehouseProducts ? (m.isMainWarehouse && mDate >= sevenDaysAgo) : (mDate >= sevenDaysAgo);
+                })
+                .sort((a, b) => new Date(b.createdAt || b.timestamp || b.date || 0) - new Date(a.createdAt || a.timestamp || a.date || 0))
                 .slice(0, 10);
 
             // Transferts en attente
@@ -46946,20 +46997,25 @@ Rapport généré par le système d'IA de gestion du stock
                                         <i data-lucide="inbox" class="w-8 h-8 mx-auto mb-2 opacity-50"></i>
                                         <div class="text-sm">Aucun mouvement récent</div>
                                     </div>
-                                ` : recentMovements.map(m => `
+                                ` : recentMovements.map(m => {
+                                    const mQty = m.qty ?? m.quantity ?? 0;
+                                    const mDate = m.createdAt || m.timestamp || m.date;
+                                    const isIn = m.type === 'in' || m.type === 'main_depot_transfer';
+                                    const isOut = m.type === 'out';
+                                    return `
                                     <div class="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg">
-                                        <div class="w-8 h-8 rounded-lg ${m.type === 'in' ? 'bg-emerald-100 text-emerald-600' : m.type === 'out' ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600'} flex items-center justify-center">
-                                            <i data-lucide="${m.type === 'in' ? 'arrow-down' : m.type === 'out' ? 'arrow-up' : 'arrow-right-left'}" class="w-4 h-4"></i>
+                                        <div class="w-8 h-8 rounded-lg ${isIn ? 'bg-emerald-100 text-emerald-600' : isOut ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600'} flex items-center justify-center">
+                                            <i data-lucide="${isIn ? 'arrow-down' : isOut ? 'arrow-up' : 'arrow-right-left'}" class="w-4 h-4"></i>
                                         </div>
                                         <div class="flex-1 min-w-0">
                                             <div class="font-bold text-slate-900 truncate text-sm">${m.productName || 'Produit'}</div>
-                                            <div class="text-xs text-slate-500">${CORE.formatDate(m.createdAt)}</div>
+                                            <div class="text-xs text-slate-500">${CORE.formatDate(mDate)}</div>
                                         </div>
-                                        <div class="font-black ${m.type === 'in' ? 'text-emerald-600' : 'text-red-600'} text-sm">
-                                            ${m.type === 'in' ? '+' : '-'}${m.qty}
+                                        <div class="font-black ${isIn ? 'text-emerald-600' : isOut ? 'text-red-600' : 'text-blue-600'} text-sm">
+                                            ${isIn ? '+' : isOut ? '-' : '±'}${mQty}
                                         </div>
                                     </div>
-                                `).join('')}
+                                `; }).join('')}
                             </div>
                         </div>
                     </div>
