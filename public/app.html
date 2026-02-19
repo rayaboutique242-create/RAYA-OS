@@ -46397,7 +46397,7 @@ Rapport généré par le système d'IA de gestion du stock
             const visiblePosList = allowPosSwitch ? (pos ? [pos] : allPos) : (pos ? [pos] : []);
 
             // Filter products by POS if selected
-            const matchesSelectedPos = (product) => this.productBelongsToPos(product, posId);
+            const matchesSelectedPos = (product) => ManagerModule.productBelongsToPos(product, posId);
 
             const filteredProducts = CORE.getVisibleProducts().filter(matchesSelectedPos);
 
