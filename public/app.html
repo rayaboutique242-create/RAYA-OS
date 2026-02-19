@@ -46458,291 +46458,129 @@ Rapport généré par le système d'IA de gestion du stock
                 ? [{value:'',label:'Tous les POS'}, ...allPos.map(p=>({value:p.id,label:p.name}))]
                 : (pos ? [{ value: pos.id, label: pos.name }] : []);
 
-            return `
-                <div class="fade-in max-w-7xl mx-auto space-y-6">
-                    <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
-                        <div>
-                            <h2 class="text-2xl font-black text-slate-900">Stock Control Center</h2>
-                            <p class="text-slate-500 font-medium">Gestion avancée répartie par POS${pos ? `: ${pos.name}` : ' (tous)'}.</p>
-                        </div>
-                        <div class="flex flex-wrap gap-2 items-center">
-                            ${allowPosSwitch ? `
-                                <select onchange="ManagerModule.state.inventoryPosId=this.value;App.rerender()" class="px-4 py-2.5 bg-white border border-slate-200 rounded-xl font-bold">
-                                    ${posOptions.map(p => `<option value="${p.value}" ${this.state.inventoryPosId === String(p.value) ? 'selected' : ''}>${p.label}</option>`).join('')}
-                                </select>
-                            ` : pos ? `
-                                <div class="px-4 py-2.5 bg-slate-100 border border-slate-200 rounded-xl font-black text-sm text-slate-700">${pos.name}</div>
-                            ` : ''}
-                            <button onclick="ManagerModule.showNewProductModal()" class="px-4 py-2.5 bg-sky-600 text-white font-black rounded-xl hover:bg-sky-700 transition">Nouveau produit</button>
-                            <button onclick="ManagerModule.showStockDashboard()" class="px-4 py-2.5 bg-indigo-600 text-white font-black rounded-xl hover:bg-indigo-700 transition">📈 Dashboard</button>
-                            <button onclick="ManagerModule.showPosStatusIndicators()" class="px-4 py-2.5 bg-cyan-600 text-white font-black rounded-xl hover:bg-cyan-700 transition">🎯 Indicateurs</button>
-                            <button onclick="ManagerModule.showTransferHistory()" class="px-4 py-2.5 bg-teal-600 text-white font-black rounded-xl hover:bg-teal-700 transition">📋 Historique</button>
-                            <button onclick="ManagerModule.showBulkRestockModal()" class="px-4 py-2.5 bg-emerald-600 text-white font-black rounded-xl hover:bg-emerald-700 transition">Réappro masse</button>
-                            <button onclick="ManagerModule.showStockTransferModal('${posId || ''}')" class="px-4 py-2.5 bg-purple-600 text-white font-black rounded-xl hover:bg-purple-700 transition">🔄 Transférer</button>
-                            <button onclick="ManagerModule.showRestockingAnalysis()" class="px-4 py-2.5 bg-purple-600 text-white font-black rounded-xl hover:bg-purple-700 transition">📊 Analyse</button>
-                            <button onclick="ManagerModule.exportRestockingRecommendations()" class="px-4 py-2.5 bg-amber-600 text-white font-black rounded-xl hover:bg-amber-700 transition">Recommandations</button>
-                            <button onclick="${tab==='products' ? 'ManagerModule.exportInventoryCSV()' : 'ManagerModule.exportMovementsCSV()'}" class="px-4 py-2.5 bg-slate-900 text-white font-black rounded-xl hover:bg-slate-800 transition">Exporter CSV</button>
-                        </div>
-                    </div>
+            // PRE-COMPUTE all heavy template sections to avoid deep stack nesting in template literals
+            // (prevents "Maximum call stack size exceeded" on mobile browsers)
 
-                    <!-- Dashboard de Réapprovisionnement -->
-                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        <div class="bg-gradient-to-br from-blue-50 to-blue-100 p-5 rounded-2xl border border-blue-200">
-                            <div class="flex items-center justify-between">
-                                <div>
-                                    <div class="text-xs font-black text-blue-600 uppercase">Stock Bas</div>
-                                    <div class="text-3xl font-black text-blue-900 mt-2">${lowCount}</div>
-                                </div>
-                                <div class="text-5xl opacity-20">📦</div>
-                            </div>
-                        </div>
-                        <div class="bg-gradient-to-br from-red-50 to-red-100 p-5 rounded-2xl border border-red-200">
-                            <div class="flex items-center justify-between">
-                                <div>
-                                    <div class="text-xs font-black text-red-600 uppercase">Critique</div>
-                                    <div class="text-3xl font-black text-red-900 mt-2">${criticalCount}</div>
-                                </div>
-                                <div class="text-5xl opacity-20">⚠️</div>
-                            </div>
-                        </div>
-                        <div class="bg-gradient-to-br from-amber-50 to-amber-100 p-5 rounded-2xl border border-amber-200">
-                            <div class="flex items-center justify-between">
-                                <div>
-                                    <div class="text-xs font-black text-amber-600 uppercase">À Commander</div>
-                                    <div class="text-3xl font-black text-amber-900 mt-2">${totalToReorder}</div>
-                                </div>
-                                <div class="text-5xl opacity-20">🛒</div>
-                            </div>
-                        </div>
-                        <div class="bg-gradient-to-br from-emerald-50 to-emerald-100 p-5 rounded-2xl border border-emerald-200">
-                            <div class="flex items-center justify-between">
-                                <div>
-                                    <div class="text-xs font-black text-emerald-600 uppercase">Coût Réappro</div>
-                                    <div class="text-2xl font-black text-emerald-900 mt-2">${CORE.formatPrice(totalReorderCost)}</div>
-                                </div>
-                                <div class="text-5xl opacity-20">💰</div>
-                            </div>
-                        </div>
-                    </div>
+            // 1. POS selector options
+            var posOptionsHtml = posOptions.map(function(p) {
+                return '<option value="' + p.value + '" ' + (ManagerModule.state.inventoryPosId === String(p.value) ? 'selected' : '') + '>' + p.label + '</option>';
+            }).join('');
 
-                    <!-- Produits critiques -->
-                    ${topCriticalProducts.length > 0 ? `
-                        <div class="bg-gradient-to-r from-red-50 to-amber-50 border border-red-200 rounded-2xl p-5">
-                            <div class="font-black text-slate-900 mb-4">⚡ Produits en Alerte Critique</div>
-                            <div class="space-y-2">
-                                ${topCriticalProducts.map(p => {
-                                    const stock = posId ? CORE.getProductStock(p.id, posId) : (p.stock || 0);
-                                    const stockPercent = p.minStock ? Math.round((stock / p.minStock) * 100) : 0;
-                                    const toOrder = Math.round((p.minStock || 0) * 2) - stock;
-                                    return `
-                                        <div class="flex items-center justify-between bg-white p-3 rounded-lg">
-                                            <div class="flex-1">
-                                                <div class="font-bold text-slate-900">${p.name}</div>
-                                                <div class="text-xs text-slate-500">Stock: ${stock} / Min: ${p.minStock || 0}</div>
-                                            </div>
-                                            <div class="flex items-center gap-3">
-                                                <div class="text-right">
-                                                    <div class="font-black text-red-600">${stockPercent}%</div>
-                                                    <div class="text-xs text-slate-500">+${toOrder} unités</div>
-                                                </div>
-                                                <div class="w-12 h-12 rounded-full ${stockPercent <= 25 ? 'bg-red-100 text-red-600' : 'bg-amber-100 text-amber-600'} flex items-center justify-center font-black">${stockPercent}%</div>
-                                            </div>
-                                        </div>
-                                    `;
-                                }).join('')}
-                            </div>
-                        </div>
-                    ` : ''}
+            // 2. Critical products alert section
+            var criticalAlertsHtml = '';
+            if (topCriticalProducts.length > 0) {
+                var alertItems = [];
+                for (var ci = 0; ci < topCriticalProducts.length; ci++) {
+                    var cp = topCriticalProducts[ci];
+                    var cpStock = posId ? CORE.getProductStock(cp.id, posId) : (cp.stock || 0);
+                    var cpPercent = cp.minStock ? Math.round((cpStock / cp.minStock) * 100) : 0;
+                    var cpToOrder = Math.round((cp.minStock || 0) * 2) - cpStock;
+                    alertItems.push('<div class="flex items-center justify-between bg-white p-3 rounded-lg"><div class="flex-1"><div class="font-bold text-slate-900">' + cp.name + '</div><div class="text-xs text-slate-500">Stock: ' + cpStock + ' / Min: ' + (cp.minStock || 0) + '</div></div><div class="flex items-center gap-3"><div class="text-right"><div class="font-black text-red-600">' + cpPercent + '%</div><div class="text-xs text-slate-500">+' + cpToOrder + ' unités</div></div><div class="w-12 h-12 rounded-full ' + (cpPercent <= 25 ? 'bg-red-100 text-red-600' : 'bg-amber-100 text-amber-600') + ' flex items-center justify-center font-black">' + cpPercent + '%</div></div></div>');
+                }
+                criticalAlertsHtml = '<div class="bg-gradient-to-r from-red-50 to-amber-50 border border-red-200 rounded-2xl p-5"><div class="font-black text-slate-900 mb-4">⚡ Produits en Alerte Critique</div><div class="space-y-2">' + alertItems.join('') + '</div></div>';
+            }
 
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <div class="bg-white p-6 rounded-3xl border border-slate-200">
-                            <div class="text-xs font-black text-slate-500 uppercase tracking-wider">Valorisation stock</div>
-                            <div class="mt-2 text-3xl font-black text-slate-900">${CORE.formatPrice(invValue)}</div>
-                        </div>
-                        <div class="bg-white p-6 rounded-3xl border border-slate-200">
-                            <div class="text-xs font-black text-slate-500 uppercase tracking-wider">Produits</div>
-                            <div class="mt-2 text-3xl font-black text-slate-900">${filteredProducts.length}</div>
-                        </div>
-                        <div class="bg-white p-6 rounded-3xl border border-slate-200">
-                            <div class="text-xs font-black text-slate-500 uppercase tracking-wider">Alertes</div>
-                            <div class="mt-2 text-3xl font-black text-red-600">${lowCount}</div>
-                        </div>
-                    </div>
+            // 3. Category filter options
+            var categoryOptionsHtml = (CORE.db.categories || []).map(function(c) {
+                return '<option value="' + c.id + '" ' + (ManagerModule.state.inventoryCategoryFilter == c.id ? 'selected' : '') + '>' + (c.name || '') + '</option>';
+            }).join('');
 
-                    <div class="bg-white rounded-3xl border border-slate-200 overflow-hidden">
-                        <div class="p-4 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
-                            <div class="flex items-center gap-2">
-                                <button onclick="ManagerModule.state.inventoryTab='products';App.rerender()" class="px-4 py-2 rounded-xl font-black text-sm ${tab==='products'?'bg-slate-900 text-white':'bg-slate-100 text-slate-700 hover:bg-slate-200'}">Produits</button>
-                                <button onclick="ManagerModule.state.inventoryTab='movements';App.rerender()" class="px-4 py-2 rounded-xl font-black text-sm ${tab==='movements'?'bg-slate-900 text-white':'bg-slate-100 text-slate-700 hover:bg-slate-200'}">Mouvements</button>
-                            </div>
+            // 4. Product table rows (pre-computed)
+            var productRowsHtml = '';
+            if (products.length === 0) {
+                productRowsHtml = '<tr><td colspan="8" class="px-6 py-12 text-center text-slate-400 font-medium">Aucun produit trouvé<div class="mt-4"><button onclick="ManagerModule.showNewProductModal()" class="px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-sm">+ Ajouter un produit</button></div></td></tr>';
+            } else {
+                var rowPosId = this.state.inventoryPosId || null;
+                var rows = [];
+                for (var ri = 0; ri < products.length; ri++) {
+                    var p = products[ri];
+                    var pStock = rowPosId ? CORE.getProductStock(p.id, rowPosId) : (p.stock || 0);
+                    var pPrice = rowPosId ? CORE.getProductPrice(p.id, rowPosId) : (p.price || 0);
+                    var pIsLow = pStock <= p.minStock;
+                    // Stocks par POS
+                    var posStockParts = [];
+                    for (var vi = 0; vi < visiblePosList.length; vi++) {
+                        var vp = visiblePosList[vi];
+                        var vpStock = CORE.getProductStock(p.id, vp.id) || 0;
+                        var vpIsCritical = vpStock <= (p.minStock * 0.5);
+                        var vpIsLow = vpStock <= p.minStock && !vpIsCritical;
+                        var vpBadge = 'bg-slate-100 text-slate-600';
+                        if (vpIsCritical) vpBadge = 'bg-red-100 text-red-700 font-bold';
+                        else if (vpIsLow) vpBadge = 'bg-amber-100 text-amber-700 font-bold';
+                        posStockParts.push('<span class="px-2 py-1 rounded text-xs font-bold ' + vpBadge + '">' + vp.name.substring(0,8) + ': ' + vpStock + '</span>');
+                    }
+                    var catName = (CORE.getCategory(p.categoryId) || {}).name || '—';
+                    var activeBadge = p.active ? UI.badge('Actif','emerald') : UI.badge('Inactif','slate');
+                    var lowBadge = pIsLow ? '<span class="ml-2">' + UI.badge('Critique','red') + '</span>' : '';
+                    rows.push('<tr class="hover:bg-slate-50"><td class="px-6 py-4"><div class="font-black text-slate-900">' + (p.name || '') + '</div><div class="text-[10px] text-slate-400">#' + (p.barcode || p.id) + '</div></td><td class="px-6 py-4"><span class="px-3 py-1 bg-slate-100 rounded-lg text-xs font-bold text-slate-600">' + catName + '</span></td><td class="px-6 py-4 text-right font-black">' + CORE.formatPrice(pPrice) + '</td><td class="px-6 py-4"><div class="flex flex-wrap gap-1">' + posStockParts.join(' ') + '</div></td><td class="px-6 py-4 text-center font-black ' + (pIsLow ? 'text-red-600' : 'text-slate-900') + '">' + pStock + '</td><td class="px-6 py-4 text-center font-black text-slate-700">' + (p.minStock || 0) + '</td><td class="px-6 py-4">' + activeBadge + ' ' + lowBadge + '</td><td class="px-6 py-4 text-right"><div class="flex items-center justify-end gap-2"><button onclick="ManagerModule.showProductInfoModal(\'' + p.id + '\')" class="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700" title="Détails produit">Info</button><button onclick="ManagerModule.showAdvancedStockModal(\'' + p.id + '\')" class="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-black hover:bg-emerald-700">Stock</button><button onclick="ManagerModule.showEditProductModal(\'' + p.id + '\')" class="px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-black hover:bg-slate-50">Éditer</button></div></td></tr>');
+                }
+                productRowsHtml = rows.join('');
+            }
 
-                            ${tab === 'products' ? `
-                                <div class="flex flex-wrap gap-2 items-center">
-                                    <div class="relative">
-                                        <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-                                        <input id="manager-inventory-search-input" type="text" value="${this.state.inventorySearch}" onkeyup="ManagerModule.updateInventorySearch(this.value)" placeholder="Rechercher produit..." class="pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-white font-medium w-[200px]" style="direction: ltr; text-align: left;" autocomplete="off">
-                                    </div>
-                                    <select onchange="ManagerModule.state.inventoryCategoryFilter=this.value;ManagerModule.state.inventoryPage=1;App.rerender()" class="px-3 py-2.5 rounded-xl border border-slate-200 bg-white font-bold">
-                                        <option value="all" ${this.state.inventoryCategoryFilter === 'all' ? 'selected' : ''}>Toutes catégories</option>
-                                        ${(CORE.db.categories || []).map(c => `<option value="${c.id}" ${this.state.inventoryCategoryFilter == c.id ? 'selected' : ''}>${c.name}</option>`).join('')}
-                                    </select>
-                                    <select onchange="ManagerModule.state.inventoryStatusFilter=this.value;ManagerModule.state.inventoryPage=1;App.rerender()" class="px-3 py-2.5 rounded-xl border border-slate-200 bg-white font-bold">
-                                        <option value="all" ${this.state.inventoryStatusFilter === 'all' ? 'selected' : ''}>Tous les stocks</option>
-                                        <option value="ok" ${this.state.inventoryStatusFilter === 'ok' ? 'selected' : ''}>✅ Stock OK</option>
-                                        <option value="low" ${this.state.inventoryStatusFilter === 'low' ? 'selected' : ''}>⚠️ Stock bas</option>
-                                        <option value="critical" ${this.state.inventoryStatusFilter === 'critical' ? 'selected' : ''}>🔴 Critique</option>
-                                        <option value="outofstock" ${this.state.inventoryStatusFilter === 'outofstock' ? 'selected' : ''}>❌ Rupture</option>
-                                    </select>
-                                    <select onchange="ManagerModule.state.inventorySortBy=this.value;App.rerender()" class="px-3 py-2.5 rounded-xl border border-slate-200 bg-white font-bold">
-                                        <option value="name" ${this.state.inventorySortBy === 'name' ? 'selected' : ''}>Nom A-Z</option>
-                                        <option value="name_desc" ${this.state.inventorySortBy === 'name_desc' ? 'selected' : ''}>Nom Z-A</option>
-                                        <option value="stock_asc" ${this.state.inventorySortBy === 'stock_asc' ? 'selected' : ''}>Stock ↑</option>
-                                        <option value="stock_desc" ${this.state.inventorySortBy === 'stock_desc' ? 'selected' : ''}>Stock ↓</option>
-                                        <option value="critical" ${this.state.inventorySortBy === 'critical' ? 'selected' : ''}>+ Critiques</option>
-                                    </select>
-                                </div>
-                            ` : `
-                                <div class="flex gap-2 flex-wrap">
-                                    <div class="relative">
-                                        <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-                                        <input id="manager-movements-search-input" type="text" value="${this.state.movementsSearch}" onkeyup="ManagerModule.updateMovementsSearch(this.value)" placeholder="Produit, ref, user..." class="pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-white font-medium w-[260px] max-w-full" style="direction: ltr; text-align: left;" autocomplete="off">
-                                    </div>
-                                    <select onchange="ManagerModule.state.movementsType=this.value;App.rerender()" class="px-3 py-2.5 rounded-xl border border-slate-200 bg-white font-bold">
-                                        ${[
-                                            {value:'all',label:'Tous'},
-                                            {value:'in',label:'Entrées'},
-                                            {value:'out',label:'Sorties'},
-                                            {value:'adjust',label:'Ajustements'}
-                                        ].map(o => `<option value="${o.value}" ${o.value===this.state.movementsType?'selected':''}>${o.label}</option>`).join('')}
-                                    </select>
-                                </div>
-                            `}
-                        </div>
+            // 5. Pagination HTML (pre-computed, no IIFE in template)
+            var paginationHtml = '';
+            try {
+                var stats = this.getProductsStats();
+                if (stats.totalPages <= 1) {
+                    paginationHtml = stats.totalFiltered > 0 ? '<div class="p-4 text-center text-sm text-slate-500 border-t border-slate-100">' + stats.totalFiltered + ' produit(s)</div>' : '';
+                } else {
+                    var pageBtns = stats.paginationPages.map(function(pg) {
+                        if (pg === '...') return '<span class="px-2 text-slate-400">...</span>';
+                        return '<button onclick="ManagerModule.state.inventoryPage=' + pg + ';App.rerender()" class="px-3 py-2 rounded-lg ' + (pg === stats.currentPage ? 'bg-sky-600 text-white' : 'bg-slate-100 hover:bg-slate-200 text-slate-700') + ' font-bold text-sm">' + pg + '</button>';
+                    }).join('');
+                    var prevDis = stats.currentPage === 1;
+                    var nextDis = stats.currentPage === stats.totalPages;
+                    var disCls = 'bg-slate-100 text-slate-400 cursor-not-allowed';
+                    var actCls = 'bg-slate-100 hover:bg-slate-200 text-slate-700';
+                    paginationHtml = '<div class="p-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-4"><div class="text-sm text-slate-600 font-medium">' + (stats.totalFiltered === 0 ? 'Aucun produit' : 'Affichage ' + (stats.startIdx + 1) + '-' + Math.min(stats.startIdx + stats.perPage, stats.totalFiltered) + ' sur ' + stats.totalFiltered) + '</div><div class="flex items-center gap-2"><span class="text-xs text-slate-500">Par page:</span><select onchange="ManagerModule.state.inventoryPerPage=parseInt(this.value);ManagerModule.state.inventoryPage=1;App.rerender()" class="px-2 py-1 rounded-lg border border-slate-200 bg-white text-sm font-bold"><option value="25" ' + (stats.perPage === 25 ? 'selected' : '') + '>25</option><option value="50" ' + (stats.perPage === 50 ? 'selected' : '') + '>50</option><option value="100" ' + (stats.perPage === 100 ? 'selected' : '') + '>100</option><option value="200" ' + (stats.perPage === 200 ? 'selected' : '') + '>200</option></select></div><div class="flex items-center gap-2"><button onclick="ManagerModule.state.inventoryPage=1;App.rerender()" class="px-3 py-2 rounded-lg ' + (prevDis ? disCls : actCls) + ' font-bold text-sm" ' + (prevDis ? 'disabled' : '') + '><i data-lucide="chevrons-left" class="w-4 h-4"></i></button><button onclick="ManagerModule.state.inventoryPage=Math.max(1,ManagerModule.state.inventoryPage-1);App.rerender()" class="px-3 py-2 rounded-lg ' + (prevDis ? disCls : actCls) + ' font-bold text-sm" ' + (prevDis ? 'disabled' : '') + '><i data-lucide="chevron-left" class="w-4 h-4"></i></button>' + pageBtns + '<button onclick="ManagerModule.state.inventoryPage=Math.min(' + stats.totalPages + ',ManagerModule.state.inventoryPage+1);App.rerender()" class="px-3 py-2 rounded-lg ' + (nextDis ? disCls : actCls) + ' font-bold text-sm" ' + (nextDis ? 'disabled' : '') + '><i data-lucide="chevron-right" class="w-4 h-4"></i></button><button onclick="ManagerModule.state.inventoryPage=' + stats.totalPages + ';App.rerender()" class="px-3 py-2 rounded-lg ' + (nextDis ? disCls : actCls) + ' font-bold text-sm" ' + (nextDis ? 'disabled' : '') + '><i data-lucide="chevrons-right" class="w-4 h-4"></i></button></div></div>';
+                }
+            } catch(pe) { console.warn('[Inventory] Pagination error:', pe); }
 
-                        ${tab === 'products' ? `
-                            <div class="overflow-auto">
-                                <table class="w-full text-left min-w-[1050px]">
-                                    <thead class="bg-slate-50 text-xs font-black text-slate-400 uppercase tracking-wider">
-                                        <tr>
-                                            <th class="px-6 py-4">Produit</th>
-                                            <th class="px-6 py-4">Catégorie</th>
-                                            <th class="px-6 py-4 text-right">Prix</th>
-                                            <th class="px-6 py-4">Stock par POS</th>
-                                            <th class="px-6 py-4 text-center">Stock</th>
-                                            <th class="px-6 py-4 text-center">Min</th>
-                                            <th class="px-6 py-4">État</th>
-                                            <th class="px-6 py-4 text-right">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody class="divide-y divide-slate-50">
-                                        ${products.length === 0 ? `<tr><td colspan="8" class="px-6 py-12 text-center text-slate-400 font-medium">Aucun produit</td></tr>` : ''}
-                                        ${products.map(p => {
-                                            const posId = this.state.inventoryPosId || null;
-                                            const stock = posId ? CORE.getProductStock(p.id, posId) : (p.stock || 0);
-                                            const price = posId ? CORE.getProductPrice(p.id, posId) : (p.price || 0);
-                                            const isLow = stock <= p.minStock;
+            // 6. Movements table rows (pre-computed)
+            var movRowsHtml = '';
+            if (movs.length === 0) {
+                movRowsHtml = '<tr><td colspan="6" class="px-6 py-12 text-center text-slate-400 font-medium">Aucun mouvement</td></tr>';
+            } else {
+                var mRows = [];
+                for (var mi = 0; mi < movs.length; mi++) {
+                    var m = movs[mi];
+                    var mTypeBadge = UI.badge(m.type, m.type==='out'?'red':m.type==='in'?'emerald':'blue');
+                    mRows.push('<tr class="hover:bg-slate-50"><td class="px-6 py-4"><div class="font-black text-slate-900">' + (m.productName || '—') + '</div><div class="text-[10px] text-slate-400">#' + (m.productId || '') + '</div></td><td class="px-6 py-4">' + mTypeBadge + '</td><td class="px-6 py-4 text-right font-black ' + (m.type==='out'?'text-red-600':'text-slate-900') + '">' + (m.type==='out' ? '-' : '+') + m.qty + '</td><td class="px-6 py-4 text-sm font-bold text-slate-700">' + (m.ref || '—') + '</td><td class="px-6 py-4 text-sm text-slate-600">' + (m.userName || 'System') + '</td><td class="px-6 py-4 text-right text-xs text-slate-500">' + CORE.formatDate(m.createdAt) + '</td></tr>');
+                }
+                movRowsHtml = mRows.join('');
+            }
 
-                                            // Stocks par POS
-                                            const posStockDisplay = visiblePosList.map(visiblePos => {
-                                                const posStock = CORE.getProductStock(p.id, visiblePos.id) || 0;
-                                                const isCritical = posStock <= (p.minStock * 0.5);
-                                                const isLowPos = posStock <= p.minStock && !isCritical;
-                                                let badgeClass = 'bg-slate-100 text-slate-600';
-                                                if (isCritical) badgeClass = 'bg-red-100 text-red-700 font-bold';
-                                                else if (isLowPos) badgeClass = 'bg-amber-100 text-amber-700 font-bold';
-                                                return `<span class="px-2 py-1 rounded text-xs font-bold ${badgeClass}">${visiblePos.name.substring(0,8)}: ${posStock}</span>`;
-                                            }).join(' ');
+            // 7. Movement type filter options
+            var movTypeOptions = [{value:'all',label:'Tous'},{value:'in',label:'Entrées'},{value:'out',label:'Sorties'},{value:'adjust',label:'Ajustements'}].map(function(o) {
+                return '<option value="' + o.value + '" ' + (o.value===ManagerModule.state.movementsType?'selected':'') + '>' + o.label + '</option>';
+            }).join('');
 
-                                            return `
-                                            <tr class="hover:bg-slate-50">
-                                                <td class="px-6 py-4">
-                                                    <div class="font-black text-slate-900">${p.name}</div>
-                                                    <div class="text-[10px] text-slate-400">#${p.barcode || p.id}</div>
-                                                </td>
-                                                <td class="px-6 py-4"><span class="px-3 py-1 bg-slate-100 rounded-lg text-xs font-bold text-slate-600">${CORE.getCategory(p.categoryId)?.name || '—'}</span></td>
-                                                <td class="px-6 py-4 text-right font-black">${CORE.formatPrice(price)}</td>
-                                                <td class="px-6 py-4">
-                                                    <div class="flex flex-wrap gap-1">
-                                                        ${posStockDisplay}
-                                                    </div>
-                                                </td>
-                                                <td class="px-6 py-4 text-center font-black ${isLow ? 'text-red-600' : 'text-slate-900'}">${stock}</td>
-                                                <td class="px-6 py-4 text-center font-black text-slate-700">${p.minStock}</td>
-                                                <td class="px-6 py-4">${p.active ? UI.badge('Actif','emerald') : UI.badge('Inactif','slate')} ${isLow ? `<span class="ml-2">${UI.badge('Critique','red')}</span>` : ''}</td>
-                                                <td class="px-6 py-4 text-right">
-                                                    <div class="flex items-center justify-end gap-2">
-                                                        <button onclick="ManagerModule.showProductInfoModal('${p.id}')" class="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700" title="Détails produit">Info</button>
-                                                        <button onclick="ManagerModule.showAdvancedStockModal('${p.id}')" class="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-black hover:bg-emerald-700">Stock</button>
-                                                        <button onclick="ManagerModule.showEditProductModal('${p.id}')" class="px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-black hover:bg-slate-50">Éditer</button>
-                                                    </div>
-                                                </td>
-                                            </tr>`;
-                                        }).join('')}
-                                    </tbody>
-                                </table>
-                            </div>
-                            ${(() => {
-                                const stats = this.getProductsStats();
-                                if (stats.totalPages <= 1) return stats.totalFiltered > 0 ? `<div class="p-4 text-center text-sm text-slate-500 border-t border-slate-100">${stats.totalFiltered} produit(s)</div>` : '';
-                                return `
-                                <div class="p-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-4">
-                                    <div class="text-sm text-slate-600 font-medium">
-                                        ${stats.totalFiltered === 0 ? 'Aucun produit' : `Affichage ${stats.startIdx + 1}-${Math.min(stats.startIdx + stats.perPage, stats.totalFiltered)} sur ${stats.totalFiltered}`}
-                                    </div>
-                                    <div class="flex items-center gap-2">
-                                        <span class="text-xs text-slate-500">Par page:</span>
-                                        <select onchange="ManagerModule.state.inventoryPerPage=parseInt(this.value);ManagerModule.state.inventoryPage=1;App.rerender()" class="px-2 py-1 rounded-lg border border-slate-200 bg-white text-sm font-bold">
-                                            <option value="25" ${stats.perPage === 25 ? 'selected' : ''}>25</option>
-                                            <option value="50" ${stats.perPage === 50 ? 'selected' : ''}>50</option>
-                                            <option value="100" ${stats.perPage === 100 ? 'selected' : ''}>100</option>
-                                            <option value="200" ${stats.perPage === 200 ? 'selected' : ''}>200</option>
-                                        </select>
-                                    </div>
-                                    <div class="flex items-center gap-2">
-                                        <button onclick="ManagerModule.state.inventoryPage=1;App.rerender()" class="px-3 py-2 rounded-lg ${stats.currentPage === 1 ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'} font-bold text-sm" ${stats.currentPage === 1 ? 'disabled' : ''}><i data-lucide="chevrons-left" class="w-4 h-4"></i></button>
-                                        <button onclick="ManagerModule.state.inventoryPage=Math.max(1,ManagerModule.state.inventoryPage-1);App.rerender()" class="px-3 py-2 rounded-lg ${stats.currentPage === 1 ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'} font-bold text-sm" ${stats.currentPage === 1 ? 'disabled' : ''}><i data-lucide="chevron-left" class="w-4 h-4"></i></button>
-                                        ${stats.paginationPages.map(p => p === '...' ? '<span class="px-2 text-slate-400">...</span>' : '<button onclick="ManagerModule.state.inventoryPage=' + p + ';App.rerender()" class="px-3 py-2 rounded-lg ' + (p === stats.currentPage ? 'bg-sky-600 text-white' : 'bg-slate-100 hover:bg-slate-200 text-slate-700') + ' font-bold text-sm">' + p + '</button>').join('')}
-                                        <button onclick="ManagerModule.state.inventoryPage=Math.min(${stats.totalPages},ManagerModule.state.inventoryPage+1);App.rerender()" class="px-3 py-2 rounded-lg ${stats.currentPage === stats.totalPages ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'} font-bold text-sm" ${stats.currentPage === stats.totalPages ? 'disabled' : ''}><i data-lucide="chevron-right" class="w-4 h-4"></i></button>
-                                        <button onclick="ManagerModule.state.inventoryPage=${stats.totalPages};App.rerender()" class="px-3 py-2 rounded-lg ${stats.currentPage === stats.totalPages ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'} font-bold text-sm" ${stats.currentPage === stats.totalPages ? 'disabled' : ''}><i data-lucide="chevrons-right" class="w-4 h-4"></i></button>
-                                    </div>
-                                </div>
-                                `;
-                            })()}
-                        ` : `
-                            <div class="overflow-auto">
-                                <table class="w-full text-left min-w-[1050px]">
-                                    <thead class="bg-slate-50 text-xs font-black text-slate-400 uppercase tracking-wider">
-                                        <tr>
-                                            <th class="px-6 py-4">Produit</th>
-                                            <th class="px-6 py-4">Type</th>
-                                            <th class="px-6 py-4 text-right">Qté</th>
-                                            <th class="px-6 py-4">Réf</th>
-                                            <th class="px-6 py-4">Utilisateur</th>
-                                            <th class="px-6 py-4 text-right">Date</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody class="divide-y divide-slate-50">
-                                        ${movs.length === 0 ? `<tr><td colspan="6" class="px-6 py-12 text-center text-slate-400 font-medium">Aucun mouvement</td></tr>` : ''}
-                                        ${movs.map(m => `
-                                            <tr class="hover:bg-slate-50">
-                                                <td class="px-6 py-4">
-                                                    <div class="font-black text-slate-900">${m.productName || '—'}</div>
-                                                    <div class="text-[10px] text-slate-400">#${m.productId || ''}</div>
-                                                </td>
-                                                <td class="px-6 py-4">${UI.badge(m.type, m.type==='out'?'red':m.type==='in'?'emerald':'blue')}</td>
-                                                <td class="px-6 py-4 text-right font-black ${m.type==='out'?'text-red-600':'text-slate-900'}">${m.type==='out' ? '-' : '+'}${m.qty}</td>
-                                                <td class="px-6 py-4 text-sm font-bold text-slate-700">${m.ref || '—'}</td>
-                                                <td class="px-6 py-4 text-sm text-slate-600">${m.userName || 'System'}</td>
-                                                <td class="px-6 py-4 text-right text-xs text-slate-500">${CORE.formatDate(m.createdAt)}</td>
-                                            </tr>
-                                        `).join('')}
-                                    </tbody>
-                                </table>
-                            </div>
-                        `}
-                    </div>
-                </div>
-            `;
+            // Now build the final template with minimal nesting (all heavy parts pre-computed)
+            var posHeader = pos ? ': ' + pos.name : ' (tous)';
+            var posSelectorHtml = allowPosSwitch ? '<select onchange="ManagerModule.state.inventoryPosId=this.value;App.rerender()" class="px-4 py-2.5 bg-white border border-slate-200 rounded-xl font-bold">' + posOptionsHtml + '</select>' : (pos ? '<div class="px-4 py-2.5 bg-slate-100 border border-slate-200 rounded-xl font-black text-sm text-slate-700">' + pos.name + '</div>' : '');
+            var exportAction = tab==='products' ? 'ManagerModule.exportInventoryCSV()' : 'ManagerModule.exportMovementsCSV()';
+
+            var productsTabActive = tab==='products' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200';
+            var movementsTabActive = tab==='movements' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200';
+            var catFilterSelected = this.state.inventoryCategoryFilter === 'all' ? 'selected' : '';
+            var statusFilterSelected = this.state.inventoryStatusFilter || 'all';
+            var sortByVal = this.state.inventorySortBy || 'name';
+
+            var filtersHtml = tab === 'products' ?
+                '<div class="flex flex-wrap gap-2 items-center"><div class="relative"><i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i><input id="manager-inventory-search-input" type="text" value="' + (this.state.inventorySearch || '') + '" onkeyup="ManagerModule.updateInventorySearch(this.value)" placeholder="Rechercher produit..." class="pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-white font-medium w-[200px]" style="direction: ltr; text-align: left;" autocomplete="off"></div><select onchange="ManagerModule.state.inventoryCategoryFilter=this.value;ManagerModule.state.inventoryPage=1;App.rerender()" class="px-3 py-2.5 rounded-xl border border-slate-200 bg-white font-bold"><option value="all" ' + catFilterSelected + '>Toutes catégories</option>' + categoryOptionsHtml + '</select><select onchange="ManagerModule.state.inventoryStatusFilter=this.value;ManagerModule.state.inventoryPage=1;App.rerender()" class="px-3 py-2.5 rounded-xl border border-slate-200 bg-white font-bold"><option value="all" ' + (statusFilterSelected === 'all' ? 'selected' : '') + '>Tous les stocks</option><option value="ok" ' + (statusFilterSelected === 'ok' ? 'selected' : '') + '>✅ Stock OK</option><option value="low" ' + (statusFilterSelected === 'low' ? 'selected' : '') + '>⚠️ Stock bas</option><option value="critical" ' + (statusFilterSelected === 'critical' ? 'selected' : '') + '>🔴 Critique</option><option value="outofstock" ' + (statusFilterSelected === 'outofstock' ? 'selected' : '') + '>❌ Rupture</option></select><select onchange="ManagerModule.state.inventorySortBy=this.value;App.rerender()" class="px-3 py-2.5 rounded-xl border border-slate-200 bg-white font-bold"><option value="name" ' + (sortByVal === 'name' ? 'selected' : '') + '>Nom A-Z</option><option value="name_desc" ' + (sortByVal === 'name_desc' ? 'selected' : '') + '>Nom Z-A</option><option value="stock_asc" ' + (sortByVal === 'stock_asc' ? 'selected' : '') + '>Stock ↑</option><option value="stock_desc" ' + (sortByVal === 'stock_desc' ? 'selected' : '') + '>Stock ↓</option><option value="critical" ' + (sortByVal === 'critical' ? 'selected' : '') + '>+ Critiques</option></select></div>'
+                : '<div class="flex gap-2 flex-wrap"><div class="relative"><i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i><input id="manager-movements-search-input" type="text" value="' + (this.state.movementsSearch || '') + '" onkeyup="ManagerModule.updateMovementsSearch(this.value)" placeholder="Produit, ref, user..." class="pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-white font-medium w-[260px] max-w-full" style="direction: ltr; text-align: left;" autocomplete="off"></div><select onchange="ManagerModule.state.movementsType=this.value;App.rerender()" class="px-3 py-2.5 rounded-xl border border-slate-200 bg-white font-bold">' + movTypeOptions + '</select></div>';
+
+            var tabContentHtml = tab === 'products' ?
+                '<div class="overflow-auto"><table class="w-full text-left min-w-[1050px]"><thead class="bg-slate-50 text-xs font-black text-slate-400 uppercase tracking-wider"><tr><th class="px-6 py-4">Produit</th><th class="px-6 py-4">Catégorie</th><th class="px-6 py-4 text-right">Prix</th><th class="px-6 py-4">Stock par POS</th><th class="px-6 py-4 text-center">Stock</th><th class="px-6 py-4 text-center">Min</th><th class="px-6 py-4">État</th><th class="px-6 py-4 text-right">Actions</th></tr></thead><tbody class="divide-y divide-slate-50">' + productRowsHtml + '</tbody></table></div>' + paginationHtml
+                : '<div class="overflow-auto"><table class="w-full text-left min-w-[1050px]"><thead class="bg-slate-50 text-xs font-black text-slate-400 uppercase tracking-wider"><tr><th class="px-6 py-4">Produit</th><th class="px-6 py-4">Type</th><th class="px-6 py-4 text-right">Qté</th><th class="px-6 py-4">Réf</th><th class="px-6 py-4">Utilisateur</th><th class="px-6 py-4 text-right">Date</th></tr></thead><tbody class="divide-y divide-slate-50">' + movRowsHtml + '</tbody></table></div>';
+
+            return '<div class="fade-in max-w-7xl mx-auto space-y-6">' +
+                '<div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4"><div><h2 class="text-2xl font-black text-slate-900">Stock Control Center</h2><p class="text-slate-500 font-medium">Gestion avancée répartie par POS' + posHeader + '.</p></div><div class="flex flex-wrap gap-2 items-center">' + posSelectorHtml + '<button onclick="ManagerModule.showNewProductModal()" class="px-4 py-2.5 bg-sky-600 text-white font-black rounded-xl hover:bg-sky-700 transition">Nouveau produit</button><button onclick="ManagerModule.showStockDashboard()" class="px-4 py-2.5 bg-indigo-600 text-white font-black rounded-xl hover:bg-indigo-700 transition">📈 Dashboard</button><button onclick="ManagerModule.showPosStatusIndicators()" class="px-4 py-2.5 bg-cyan-600 text-white font-black rounded-xl hover:bg-cyan-700 transition">🎯 Indicateurs</button><button onclick="ManagerModule.showTransferHistory()" class="px-4 py-2.5 bg-teal-600 text-white font-black rounded-xl hover:bg-teal-700 transition">📋 Historique</button><button onclick="ManagerModule.showBulkRestockModal()" class="px-4 py-2.5 bg-emerald-600 text-white font-black rounded-xl hover:bg-emerald-700 transition">Réappro masse</button><button onclick="ManagerModule.showStockTransferModal(\'' + (posId || '') + '\')" class="px-4 py-2.5 bg-purple-600 text-white font-black rounded-xl hover:bg-purple-700 transition">🔄 Transférer</button><button onclick="ManagerModule.showRestockingAnalysis()" class="px-4 py-2.5 bg-purple-600 text-white font-black rounded-xl hover:bg-purple-700 transition">📊 Analyse</button><button onclick="ManagerModule.exportRestockingRecommendations()" class="px-4 py-2.5 bg-amber-600 text-white font-black rounded-xl hover:bg-amber-700 transition">Recommandations</button><button onclick="' + exportAction + '" class="px-4 py-2.5 bg-slate-900 text-white font-black rounded-xl hover:bg-slate-800 transition">Exporter CSV</button></div></div>' +
+                '<div class="grid grid-cols-1 md:grid-cols-4 gap-4"><div class="bg-gradient-to-br from-blue-50 to-blue-100 p-5 rounded-2xl border border-blue-200"><div class="flex items-center justify-between"><div><div class="text-xs font-black text-blue-600 uppercase">Stock Bas</div><div class="text-3xl font-black text-blue-900 mt-2">' + lowCount + '</div></div><div class="text-5xl opacity-20">📦</div></div></div><div class="bg-gradient-to-br from-red-50 to-red-100 p-5 rounded-2xl border border-red-200"><div class="flex items-center justify-between"><div><div class="text-xs font-black text-red-600 uppercase">Critique</div><div class="text-3xl font-black text-red-900 mt-2">' + criticalCount + '</div></div><div class="text-5xl opacity-20">⚠️</div></div></div><div class="bg-gradient-to-br from-amber-50 to-amber-100 p-5 rounded-2xl border border-amber-200"><div class="flex items-center justify-between"><div><div class="text-xs font-black text-amber-600 uppercase">À Commander</div><div class="text-3xl font-black text-amber-900 mt-2">' + totalToReorder + '</div></div><div class="text-5xl opacity-20">🛒</div></div></div><div class="bg-gradient-to-br from-emerald-50 to-emerald-100 p-5 rounded-2xl border border-emerald-200"><div class="flex items-center justify-between"><div><div class="text-xs font-black text-emerald-600 uppercase">Coût Réappro</div><div class="text-2xl font-black text-emerald-900 mt-2">' + CORE.formatPrice(totalReorderCost) + '</div></div><div class="text-5xl opacity-20">💰</div></div></div></div>' +
+                criticalAlertsHtml +
+                '<div class="grid grid-cols-1 md:grid-cols-3 gap-4"><div class="bg-white p-6 rounded-3xl border border-slate-200"><div class="text-xs font-black text-slate-500 uppercase tracking-wider">Valorisation stock</div><div class="mt-2 text-3xl font-black text-slate-900">' + CORE.formatPrice(invValue) + '</div></div><div class="bg-white p-6 rounded-3xl border border-slate-200"><div class="text-xs font-black text-slate-500 uppercase tracking-wider">Produits</div><div class="mt-2 text-3xl font-black text-slate-900">' + filteredProducts.length + '</div></div><div class="bg-white p-6 rounded-3xl border border-slate-200"><div class="text-xs font-black text-slate-500 uppercase tracking-wider">Alertes</div><div class="mt-2 text-3xl font-black text-red-600">' + lowCount + '</div></div></div>' +
+                '<div class="bg-white rounded-3xl border border-slate-200 overflow-hidden"><div class="p-4 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3"><div class="flex items-center gap-2"><button onclick="ManagerModule.state.inventoryTab=\'products\';App.rerender()" class="px-4 py-2 rounded-xl font-black text-sm ' + productsTabActive + '">Produits</button><button onclick="ManagerModule.state.inventoryTab=\'movements\';App.rerender()" class="px-4 py-2 rounded-xl font-black text-sm ' + movementsTabActive + '">Mouvements</button></div>' + filtersHtml + '</div>' + tabContentHtml + '</div>' +
+            '</div>';
         },
 
         renderMainStockControlCenter() { console.log('[MainStock] renderMainStockControlCenter called, products:', (CORE.db.products || []).length, 'hasMainWarehouse:', (CORE.db.products || []).some(p => p.isMainWarehouse));
