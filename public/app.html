@@ -5157,6 +5157,9 @@ select.form-input { cursor: pointer; }
             }
 
             // === CLOUD-FIRST: Push to server (source of truth) ===
+            // PERF: Debounce cloud pushes — batch rapid save(true) calls into one network sync.
+            // Without this, a single transfer triggers save(true) which fires 4-5 PUT requests,
+            // and if recordStockMovement also calls save(), that's another 4-5 PUTs — all redundant.
             if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine && this.hasDirty()) {
                 clearTimeout(this._cloudPushTimer);
                 // Auto-reset stuck lock after 30s
@@ -5165,48 +5168,47 @@ select.form-input { cursor: pointer; }
                     this._isCloudPushing = false;
                 }
 
-                var pushFn = (retryCount) => {
-                    retryCount = retryCount || 0;
-                    if (!this._isCloudPushing && this.hasDirty()) {
-                        this._isCloudPushing = true;
-                        this._cloudPushStart = Date.now();
-                        var dirtyList = this.getDirtyCollections();
-                        console.log('[CLOUD-SAVE] ☁ Pushing ' + dirtyList.length + ' dirty collections:', dirtyList.join(', '));
-                        API.syncDirtyToCloud(dirtyList).then(() => {
-                            console.log('[CLOUD-SAVE] ✅ Saved to server (source of truth)');
-                            this._isCloudPushing = false;
-                            this._consecutiveFailures = 0;
-                        }).catch(e => {
-                            this._isCloudPushing = false;
-                            this._consecutiveFailures = (this._consecutiveFailures || 0) + 1;
-                            // If not authenticated — don't retry, wait for re-login
-                            if (e && (e._noAuth || e._sessionExpired)) {
-                                console.warn('[CLOUD-SAVE] ⚠ Not authenticated à data saved locally, waiting for re-login');
-                                // Keep dirty state so it syncs on next successful auth
-                                return;
-                            }
-                            // Exponential backoff: 5s, 10s, 20s, 40s, max 60s
-                            var delay = Math.min(5000 * Math.pow(2, retryCount), 60000);
-                            console.warn('[CLOUD-SAVE] ⚠ Push failed (retry ' + (retryCount+1) + ' in ' + (delay/1000) + 's):', e.message);
-                            if (retryCount < 5) {
-                                this._cloudPushTimer = setTimeout(() => pushFn(retryCount + 1), delay);
-                            } else {
-                                console.error('[CLOUD-SAVE] ❌ Max retries reached. Data saved locally, will sync on next cycle.');
-                                if (typeof UI !== 'undefined' && UI.toast && this._consecutiveFailures > 3) {
-                                    UI.toast('⚠ Synchronisation échouée à vos données sont sauvegardées localement', 'warning', 8000);
-                                }
-                            }
-                        });
-                    }
-                };
+                // PERF: Debounce — wait 3s of inactivity before pushing to cloud.
+                // This batches multiple rapid saves into a single network sync.
+                // E.g., a transfer marks 5 collections dirty across 2 save() calls → 1 sync with 5 collections.
+                this._cloudPushTimer = setTimeout(() => {
+                    this._doCloudPush(0);
+                }, 3000);
+            }
+        },
 
-                if (immediate) {
-                    // Immediate push for critical operations (login, explicit saves)
-                    pushFn();
-                } else {
-                    // Fast debounce (500ms) to batch rapid saves while staying near-realtime
-                    this._cloudPushTimer = setTimeout(pushFn, 500);
-                }
+        // Extracted cloud push logic with retry support
+        _doCloudPush(retryCount) {
+            retryCount = retryCount || 0;
+            if (!this._isCloudPushing && this.hasDirty()) {
+                this._isCloudPushing = true;
+                this._cloudPushStart = Date.now();
+                var dirtyList = this.getDirtyCollections();
+                console.log('[CLOUD-SAVE] ☁ Pushing ' + dirtyList.length + ' dirty collections:', dirtyList.join(', '));
+                API.syncDirtyToCloud(dirtyList).then(() => {
+                    console.log('[CLOUD-SAVE] ✅ Saved to server (source of truth)');
+                    this._isCloudPushing = false;
+                    this._consecutiveFailures = 0;
+                }).catch(e => {
+                    this._isCloudPushing = false;
+                    this._consecutiveFailures = (this._consecutiveFailures || 0) + 1;
+                    // If not authenticated — don't retry, wait for re-login
+                    if (e && (e._noAuth || e._sessionExpired)) {
+                        console.warn('[CLOUD-SAVE] ⚠ Not authenticated → data saved locally, waiting for re-login');
+                        return;
+                    }
+                    // Exponential backoff: 5s, 10s, 20s, 40s, max 60s
+                    var delay = Math.min(5000 * Math.pow(2, retryCount), 60000);
+                    console.warn('[CLOUD-SAVE] ⚠ Push failed (retry ' + (retryCount+1) + ' in ' + (delay/1000) + 's):', e.message);
+                    if (retryCount < 5) {
+                        this._cloudPushTimer = setTimeout(() => this._doCloudPush(retryCount + 1), delay);
+                    } else {
+                        console.error('[CLOUD-SAVE] ❌ Max retries reached. Data saved locally, will sync on next cycle.');
+                        if (typeof UI !== 'undefined' && UI.toast && this._consecutiveFailures > 3) {
+                            UI.toast('⚠ Synchronisation échouée — vos données sont sauvegardées localement', 'warning', 8000);
+                        }
+                    }
+                });
             }
         },
         reset() {
@@ -10895,9 +10897,9 @@ select.form-input { cursor: pointer; }
             maxRetries: 5,
             baseRetryDelay: 1000, // ms
             maxRetryDelay: 60000, // 1 minute max
-            autoSyncInterval: 60000, // 60 secondes (PERF: reduced from 30s)
-            minAutoSyncInterval: 15000,
-            maxAutoSyncInterval: 120000,
+            autoSyncInterval: 300000, // 5 min (PERF: reduced from 60s — now handled by App periodic sync)
+            minAutoSyncInterval: 60000,
+            maxAutoSyncInterval: 600000,
             batchSize: 25,
             maxQueueSize: 500
         },
@@ -10917,10 +10919,10 @@ select.form-input { cursor: pointer; }
             window.addEventListener('online', () => this.handleOnline());
             window.addEventListener('offline', () => this.handleOffline());
 
-            // Démarrer l'auto-sync si en ligne
-            if (navigator.onLine) {
-                this.startAutoSync();
-            }
+            // PERF: Don't start OfflineManager auto-sync — App._finishInit periodic sync handles it.
+            // Having two independent sync timers doubles the request volume.
+            // OfflineManager only syncs pendingSyncs queue on reconnect (handleOnline).
+            // if (navigator.onLine) { this.startAutoSync(); }
 
             // Initialiser la structure dans CORE.db
             if (!CORE.db.pendingSyncs) CORE.db.pendingSyncs = [];
@@ -60813,7 +60815,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 fetch(baseUrl + '/api/health', { method: 'GET', mode: 'cors' })
                     .then(function(r) { console.log('[KEEPALIVE] ping ' + r.status); })
                     .catch(function() { /* silent */ });
-            }, 10 * 60 * 1000); // PERF: every 10 minutes (was 4 min)
+            }, 15 * 60 * 1000); // PERF: every 15 minutes (was 10 min) — Railway Pro doesn't sleep
             // Also do an immediate ping on start
             fetch(baseUrl + '/api/health', { method: 'GET', mode: 'cors' }).catch(function(){});
             console.log('[KEEPALIVE] Started — pinging every 10min');
@@ -61848,17 +61850,35 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     CORE.clearDirty(dirtyArr);
                     return true;
                 }
-                console.log('[SYNC-DIRTY] PUT by collection for ' + keys.length + ' collections: ' + keys.join(', '));
+                // PERF: Use bulk PUT /sync to send ALL collections in a single HTTP request
+                // instead of N sequential PUT /sync/:collection requests (saves N-1 round trips).
+                console.log('[SYNC-DIRTY] PUT bulk for ' + keys.length + ' collections: ' + keys.join(', '));
                 var pushedVersions = {};
-                for (var pi = 0; pi < keys.length; pi++) {
-                    var pcol = keys[pi];
-                    var pData = collections[pcol] || [];
-                    var putResult = await this.request('/sync/' + encodeURIComponent(pcol), {
+                try {
+                    var bulkResult = await this.request('/sync', {
                         method: 'PUT',
-                        body: { data: pData }
+                        body: { collections: collections }
                     });
-                    if (putResult && typeof putResult.version === 'number') {
-                        pushedVersions[pcol] = putResult.version;
+                    if (bulkResult && bulkResult.versions) {
+                        pushedVersions = bulkResult.versions;
+                    }
+                } catch(bulkErr) {
+                    // Fallback: if bulk endpoint fails (404/500), try per-collection
+                    console.warn('[SYNC-DIRTY] Bulk PUT failed, falling back to per-collection:', bulkErr.message);
+                    for (var pi = 0; pi < keys.length; pi++) {
+                        var pcol = keys[pi];
+                        var pData = collections[pcol] || [];
+                        try {
+                            var putResult = await this.request('/sync/' + encodeURIComponent(pcol), {
+                                method: 'PUT',
+                                body: { data: pData }
+                            });
+                            if (putResult && typeof putResult.version === 'number') {
+                                pushedVersions[pcol] = putResult.version;
+                            }
+                        } catch(perColErr) {
+                            console.warn('[SYNC-DIRTY] PUT ' + pcol + ' failed:', perColErr.message);
+                        }
                     }
                 }
                 if (Object.keys(pushedVersions).length > 0) this.updateCloudVersions(pushedVersions);
@@ -62682,7 +62702,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         })();
                     }
                 }
-            }, 180000); // PERF: Check every 180s (3 min) instead of 60s — reduces requests by 3x
+            }, 300000); // PERF: Check every 300s (5 min) instead of 60s — reduces requests by 5x
         },
 
         mount(html) { if (!html || html.length < 10) { console.error('[App] mount received empty/tiny html:', html); return; }
