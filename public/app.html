@@ -26227,6 +26227,22 @@ Rapport généré par le système d'IA de gestion du stock
     // MODULE: GESTIONNAIRE (Logistique / Stock)
     // =========================================================
     const GestionnaireModule = {
+        // productBelongsToPos — delegate to ManagerModule (shared logic)
+        productBelongsToPos(product, posId) {
+            if (typeof ManagerModule !== 'undefined' && ManagerModule.productBelongsToPos) {
+                return ManagerModule.productBelongsToPos(product, posId);
+            }
+            if (!posId) return true;
+            if (!product) return false;
+            const strPosId = String(posId);
+            if (String(product.posId) === strPosId) return true;
+            const sm = product.posStocks || {};
+            const e = sm[strPosId] ?? sm[posId] ?? null;
+            if (!e) return false;
+            const st = Number(e.stock ?? e.quantity ?? 0);
+            return (Number.isFinite(st) && st > 0) || e.assigned === true;
+        },
+
         state: {
             currentView: 'dashboard',
             financeView: 'overview',
@@ -34531,22 +34547,28 @@ Rapport généré par le système d'IA de gestion du stock
 
                 render() {
             const view = this.state.currentView;
-            this.loadThemePreference(); // Charger le thème préféré
-            this.checkCriticalEvents(); // Vérifier les événements critiques
+            this.loadThemePreference();
+            this.checkCriticalEvents();
 
-            const content = view === 'settings' ? this.renderSettings() :
-                            view === 'dashboard' ? this.renderDashboard() :
-                            view === 'stocks' ? this.renderStocks() :
-                            view === 'deliveries' ? this.renderDeliveries() :
-                            view === 'team' ? this.renderTeam() :
-                            view === 'planning' ? this.renderPlanning() :
-                            view === 'reports' ? this.renderReports() :
-                            view === 'reconciliation' ? this.renderReconciliation() :
-                            view === 'finance' ? this.renderFinance() :
-                            view === 'auditlog' ? this.renderAuditLog() :
-                            view === 'incidents' ? this.renderIncidentCenter() :
-                            view === 'deliverymen' ? this.renderIndependentDeliveryMenApproval() :
-                            `<div class="p-10 text-center text-slate-400 font-medium">Vue en construction</div>`;
+            let content;
+            try {
+                content = view === 'settings' ? this.renderSettings() :
+                          view === 'dashboard' ? this.renderDashboard() :
+                          view === 'stocks' ? this.renderStocks() :
+                          view === 'deliveries' ? this.renderDeliveries() :
+                          view === 'team' ? this.renderTeam() :
+                          view === 'planning' ? this.renderPlanning() :
+                          view === 'reports' ? this.renderReports() :
+                          view === 'reconciliation' ? this.renderReconciliation() :
+                          view === 'finance' ? this.renderFinance() :
+                          view === 'auditlog' ? this.renderAuditLog() :
+                          view === 'incidents' ? this.renderIncidentCenter() :
+                          view === 'deliverymen' ? this.renderIndependentDeliveryMenApproval() :
+                          `<div class="p-10 text-center text-slate-400 font-medium">Vue en construction</div>`;
+            } catch(renderErr) {
+                console.error('[GestionnaireModule] render error for view:', view, renderErr);
+                content = `<div class="p-10 text-center"><div class="text-red-500 font-black text-lg">Erreur de rendu: ${view}</div><div class="text-slate-500 mt-2">${renderErr.message}</div><button onclick="GestionnaireModule.state.currentView='dashboard';App.rerender()" class="mt-4 px-4 py-2 bg-sky-600 text-white rounded-xl font-bold">Retour Dashboard</button></div>`;
+            }
 
             return `
                 <div class="flex h-screen bg-slate-100">
