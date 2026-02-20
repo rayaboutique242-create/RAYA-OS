@@ -5057,7 +5057,15 @@ select.form-input { cursor: pointer; }
             try {
                 var raw = localStorage.getItem(this._eventQueueKey);
                 this._eventQueue = raw ? JSON.parse(raw) : [];
-                this._eventSeqNo = parseInt(localStorage.getItem(this._eventSeqKey) || '0', 10) || 0;
+                var storedSeq = localStorage.getItem(this._eventSeqKey) || '0';
+                var parsed = parseInt(storedSeq, 10) || 0;
+                // Guard: if seqNo exceeds JS safe integer range, it's corrupted → reset
+                if (parsed > Number.MAX_SAFE_INTEGER || parsed < 0 || !Number.isFinite(parsed)) {
+                    console.warn('[CRDT] Corrupted seqNo detected (' + storedSeq + ') — resetting to 0');
+                    parsed = 0;
+                    localStorage.removeItem(this._eventSeqKey);
+                }
+                this._eventSeqNo = parsed;
             } catch(e) { this._eventQueue = []; this._eventSeqNo = 0; }
         },
 
@@ -6825,7 +6833,7 @@ select.form-input { cursor: pointer; }
                 .sort((a, b) => new Date(b.createdAt || b.updatedAt || 0) - new Date(a.createdAt || a.updatedAt || 0));
         },
 
-        approveTransferReceipt(receiptId, note = '') {
+        approveTransferReceipt(receiptId, note = '', attachments = null) {
             const receipt = this.getTransferReceipt(receiptId);
             if (!receipt) return { success: false, message: 'Transfert introuvable.' };
             if (receipt.status !== 'pending') return { success: false, message: 'Transfert déjà traité.' };
@@ -6840,6 +6848,9 @@ select.form-input { cursor: pointer; }
             receipt.receivedById = this.state.currentUser?.id || null;
             receipt.receivedByName = this.state.currentUser?.name || null;
             if (note) receipt.receivedNote = note;
+            if (attachments && Array.isArray(attachments) && attachments.length > 0) {
+                receipt.attachments = (receipt.attachments || []).concat(attachments);
+            }
 
             if (!product.posStocks) product.posStocks = {};
             if (!product.posStocks[receipt.toPosId]) {
@@ -6900,8 +6911,21 @@ select.form-input { cursor: pointer; }
             receipt.rejectedReason = reason || '';
 
             if (product) {
-                product.stock = (Number(product.stock) || 0) + receipt.quantity;
-                if (product.posStocks && receipt.toPosId !== null && receipt.toPosId !== undefined && product.posStocks[receipt.toPosId]) {
+                // BUG FIX: Retourner le stock au POS source (fromPosId) au lieu du stock global
+                if (!product.posStocks) product.posStocks = {};
+                const fromPosId = receipt.fromPosId;
+                if (fromPosId) {
+                    if (!product.posStocks[fromPosId]) {
+                        product.posStocks[fromPosId] = { stock: 0, lastUpdated: now };
+                    }
+                    product.posStocks[fromPosId].stock = (Number(product.posStocks[fromPosId].stock) || 0) + receipt.quantity;
+                    product.posStocks[fromPosId].lastUpdated = now;
+                } else {
+                    // Fallback: si pas de fromPosId, ajouter au stock global
+                    product.stock = (Number(product.stock) || 0) + receipt.quantity;
+                }
+                // Réduire le pendingIncoming du POS destinataire
+                if (receipt.toPosId !== null && receipt.toPosId !== undefined && product.posStocks[receipt.toPosId]) {
                     const entry = product.posStocks[receipt.toPosId];
                     const currentPending = Number(entry.pendingIncoming || 0);
                     entry.pendingIncoming = Math.max(0, currentPending - receipt.quantity);
@@ -26641,6 +26665,24 @@ Rapport généré par le système d'IA de gestion du stock
                     this.state.criticalAlerts['incident_' + inc.id] = true;
                 }
             });
+
+            // Vérifier les transferts entrants (transfer_incoming) dans CORE.db.notifications
+            const incomingTransferNotifs = (CORE.db.notifications || []).filter(n =>
+                n.type === 'transfer_incoming' &&
+                String(n.posId) === String(posId) &&
+                !n.read
+            );
+            incomingTransferNotifs.forEach(n => {
+                if (!this.state.criticalAlerts['transfer_' + n.id]) {
+                    const transfer = (CORE.db.stockTransfers || []).find(t => t.id === n.transferId);
+                    const itemCount = transfer ? (transfer.items || []).length : 0;
+                    const fromPosName = transfer ? (CORE.getPOS(transfer.sourcePosId)?.name || 'POS source') : 'un POS';
+                    this.addNotification('transfer_incoming', '📦 Transfert entrant',
+                        `${itemCount} produit(s) reçu(s) de ${fromPosName} — Veuillez valider ou rejeter`,
+                        'amber');
+                    this.state.criticalAlerts['transfer_' + n.id] = true;
+                }
+            });
         },
 
         testNotification() {
@@ -30155,6 +30197,14 @@ Rapport généré par le système d'IA de gestion du stock
             CORE.markDirty('stockMovements');
             CORE.markDirty('notifications');
             CORE.save(true);
+
+            // SYNC FIX: Force immediate cloud push (500ms debounce instead of 3s)
+            // so that the destination POS sees the transfer immediately
+            clearTimeout(CORE._cloudPushTimer);
+            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                CORE._cloudPushTimer = setTimeout(() => CORE._doCloudPush(0), 500);
+            }
+
             this.invalidateCache();
             UI.closeModal();
             UI.toast('📤 Transfert envoyé! En attente de réception par ' + destPos.name, 'success');
@@ -30185,22 +30235,29 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         async showPendingTransfersModal() {
-            // CRITICAL FIX: Pull stockTransfers from cloud BEFORE displaying
-            // Without this, the gestionnaire only sees data from the last full sync (~25 min)
+            // CRITICAL FIX: Pull stockTransfers + products from cloud BEFORE displaying
+            // Without this, the gestionnaire only sees data from the last full sync
             if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
                 try {
                     UI.toast('Chargement des transferts...', 'info', 2000);
-                    const fresh = await API.request('/sync/stockTransfers?light=1', { method: 'GET', timeout: 8000 });
+                    // Pull all critical data in parallel for speed
+                    const [fresh, freshNotif, freshProducts] = await Promise.all([
+                        API.request('/sync/stockTransfers?light=1', { method: 'GET', timeout: 8000 }).catch(e => null),
+                        API.request('/sync/notifications?light=1', { method: 'GET', timeout: 8000 }).catch(e => null),
+                        API.request('/sync/products?light=1', { method: 'GET', timeout: 8000 }).catch(e => null)
+                    ]);
                     if (fresh && Array.isArray(fresh.data)) {
                         CORE.db.stockTransfers = API._smartMerge(CORE.db.stockTransfers || [], fresh.data);
-                        CORE.save();
                         console.log('[TRANSFERS] Pulled ' + fresh.data.length + ' stockTransfers from cloud');
                     }
-                    // Also pull notifications (transfer_incoming)
-                    const freshNotif = await API.request('/sync/notifications?light=1', { method: 'GET', timeout: 8000 });
                     if (freshNotif && Array.isArray(freshNotif.data)) {
                         CORE.db.notifications = API._smartMerge(CORE.db.notifications || [], freshNotif.data);
                     }
+                    if (freshProducts && Array.isArray(freshProducts.data)) {
+                        CORE.db.products = API._smartMerge(CORE.db.products || [], freshProducts.data);
+                        console.log('[TRANSFERS] Pulled ' + freshProducts.data.length + ' products from cloud');
+                    }
+                    CORE.save();
                 } catch(e) {
                     console.warn('[TRANSFERS] Cloud pull failed, using cached data:', e.message);
                 }
@@ -30471,6 +30528,26 @@ Rapport généré par le système d'IA de gestion du stock
                 return UI.toast('Transfert introuvable', 'error');
             }
 
+            // SYNC FIX: Pull latest products from cloud before confirming reception
+            // to ensure we have the latest stock data from the source POS
+            (async () => {
+                try {
+                    if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                        const freshProducts = await API.request('/sync/products?light=1', { method: 'GET', timeout: 8000 });
+                        if (freshProducts && Array.isArray(freshProducts.data)) {
+                            CORE.db.products = API._smartMerge(CORE.db.products || [], freshProducts.data);
+                            console.log('[TRANSFER-RECEPTION] Pulled ' + freshProducts.data.length + ' products from cloud before confirmation');
+                        }
+                    }
+                } catch(e) {
+                    console.warn('[TRANSFER-RECEPTION] Could not pull latest products:', e.message);
+                }
+                this._doConfirmTransferReception(transfer, transferId);
+            })();
+        },
+
+        _doConfirmTransferReception(transfer, transferId) {
+
             const note = document.getElementById('reception_note')?.value?.trim() || '';
             const media = this._receptionMedia || [];
 
@@ -30586,6 +30663,13 @@ Rapport généré par le système d'IA de gestion du stock
             CORE.markDirty('stockMovements');
             CORE.markDirty('notifications');
             CORE.save(true);
+
+            // SYNC FIX: Force immediate cloud push (500ms) so the source POS sees the confirmation quickly
+            clearTimeout(CORE._cloudPushTimer);
+            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                CORE._cloudPushTimer = setTimeout(() => CORE._doCloudPush(0), 500);
+            }
+
             this.invalidateCache();
             UI.closeModal();
             UI.toast('✅ Réception confirmée! ' + qty + ' ' + product.name + ' ajoutés au stock', 'success');
@@ -30598,7 +30682,7 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         showRejectTransferModal(transferId) {
-            const transfer = (CORE.db.stockTransfers || []).find(t => t.id === transferId);
+            const transfer = (CORE.db.stockTransfers || []).find(t => t.id == transferId);
             if (!transfer) return UI.toast('Transfert introuvable', 'error');
 
             const html = `
@@ -30685,8 +30769,10 @@ Rapport généré par le système d'IA de gestion du stock
             const sourcePosId = transfer.sourcePosId;
             const qty = Number(transfer.qty) || 0;
 
-            // Chercher le produit avec comparaison flexible
-            const product = CORE.getVisibleProducts().find(p => p.id == productId);
+            // BUG FIX: Utiliser CORE.getProduct() au lieu de getVisibleProducts()
+            // getVisibleProducts() filtre par POS courant, mais le produit appartient au POS source
+            let product = CORE.getProduct ? CORE.getProduct(productId) : null;
+            if (!product) product = (CORE.db.products || []).find(p => p.id == productId);
             if (!product) {
                 console.error('Produit introuvable:', productId);
                 return UI.toast('Produit introuvable', 'error');
@@ -30774,6 +30860,13 @@ Rapport généré par le système d'IA de gestion du stock
             CORE.markDirty('stockMovements');
             CORE.markDirty('notifications');
             CORE.save(true);
+
+            // SYNC FIX: Force immediate cloud push so source POS sees rejection quickly
+            clearTimeout(CORE._cloudPushTimer);
+            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                CORE._cloudPushTimer = setTimeout(() => CORE._doCloudPush(0), 500);
+            }
+
             this.invalidateCache();
             UI.closeModal();
             UI.toast('❌ Transfert rejeté. Stock retourné à ' + transfer.sourcePosName, 'info');
@@ -30924,12 +31017,12 @@ Rapport généré par le système d'IA de gestion du stock
             return this.getPendingIncomingTransfers().length;
         },
 
-        // Notifications de transferts (réceptions confirmées/rejetées)
+        // Notifications de transferts (entrantes + réceptions confirmées/rejetées)
         getTransferNotifications() {
             const currentPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
             return (CORE.db.notifications || []).filter(n =>
                 (String(n.posId) === String(currentPosId)) &&
-                (n.type === 'transfer_received' || n.type === 'transfer_rejected') &&
+                (n.type === 'transfer_incoming' || n.type === 'transfer_received' || n.type === 'transfer_rejected') &&
                 !n.read
             ).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         },
@@ -30943,7 +31036,7 @@ Rapport généré par le système d'IA de gestion du stock
             const _nPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
             const allNotifications = (CORE.db.notifications || []).filter(n =>
                 (String(n.posId) === String(_nPosId)) &&
-                (n.type === 'transfer_received' || n.type === 'transfer_rejected')
+                (n.type === 'transfer_incoming' || n.type === 'transfer_received' || n.type === 'transfer_rejected')
             ).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 20);
 
             const html = `
@@ -30961,13 +31054,16 @@ Rapport généré par le système d'IA de gestion du stock
                         </div>
                     ` : allNotifications.map(n => {
                         const isReceived = n.type === 'transfer_received';
+                        const isIncoming = n.type === 'transfer_incoming';
                         const transfer = (CORE.db.stockTransfers || []).find(t => t.id === n.transferId);
+                        const borderClass = isIncoming ? 'border-amber-300 bg-amber-50' : (isReceived ? '' : 'border-red-200 bg-red-50');
+                        const icon = isIncoming ? '📦' : (isReceived ? '✅' : '❌');
                         return `
-                            <div class="p-4 rounded-xl border ${!n.read ? 'border-blue-300 bg-blue-50' : 'border-slate-200 bg-white'} ${isReceived ? '' : 'border-red-200 bg-red-50'}">
+                            <div class="p-4 rounded-xl border ${!n.read ? 'border-blue-300 bg-blue-50' : 'border-slate-200 bg-white'} ${borderClass}">
                                 <div class="flex items-start justify-between gap-4">
                                     <div class="flex-1">
                                         <div class="flex items-center gap-2 mb-1">
-                                            <span class="text-xl">${isReceived ? '✅' : '❌'}</span>
+                                            <span class="text-xl">${icon}</span>
                                             <span class="font-black text-slate-900">${n.title}</span>
                                             ${!n.read ? '<span class="px-2 py-0.5 bg-blue-500 text-white text-[10px] font-black rounded-full">NOUVEAU</span>' : ''}
                                         </div>
@@ -30979,6 +31075,11 @@ Rapport généré par le système d'IA de gestion du stock
                                         </div>
                                     </div>
                                     <div class="flex flex-col gap-2">
+                                        ${isIncoming && transfer && transfer.status === 'pending' ? `
+                                            <button onclick="UI.closeModal();GestionnaireModule.showPendingTransfersModal()" class="px-3 py-2 bg-amber-600 text-white rounded-xl text-xs font-bold hover:bg-amber-700 flex items-center gap-1">
+                                                📦 Voir transfert
+                                            </button>
+                                        ` : ''}
                                         ${transfer && (transfer.receptionMedia?.length > 0 || transfer.rejectionMedia?.length > 0) ? `
                                             <button onclick="GestionnaireModule.showTransferMedia('${n.transferId}')" class="px-3 py-2 bg-slate-800 text-white rounded-xl text-xs font-bold hover:bg-slate-900 flex items-center gap-1">
                                                 <i data-lucide="image" class="w-4 h-4"></i>
@@ -31022,19 +31123,27 @@ Rapport généré par le système d'IA de gestion du stock
             const notif = (CORE.db.notifications || []).find(n => n.id === notifId);
             if (notif) {
                 notif.read = true;
-                CORE.save();
+                notif.readAt = new Date().toISOString();
+                notif.updatedAt = new Date().toISOString();
+                CORE.markDirty('notifications');
+                CORE.save(true);
                 this.showTransferNotificationsModal();
             }
         },
 
         markAllTransferNotificationsRead() {
             const currentPosId = CORE.state.currentUser?.pos;
+            let changed = false;
             (CORE.db.notifications || []).forEach(n => {
-                if (n.posId == currentPosId && (n.type === 'transfer_received' || n.type === 'transfer_rejected')) {
+                if (n.posId == currentPosId && (n.type === 'transfer_incoming' || n.type === 'transfer_received' || n.type === 'transfer_rejected') && !n.read) {
                     n.read = true;
+                    n.readAt = new Date().toISOString();
+                    n.updatedAt = new Date().toISOString();
+                    changed = true;
                 }
             });
-            CORE.save();
+            if (changed) CORE.markDirty('notifications');
+            CORE.save(true);
             UI.closeModal();
             UI.toast('Toutes les notifications marquées comme lues', 'success');
             App.rerender();
@@ -34713,7 +34822,7 @@ Rapport généré par le système d'IA de gestion du stock
                                 <div class="flex items-center gap-4">
                                     <button onclick="GestionnaireModule.showNotificationHistory()" class="relative px-3 py-2 rounded-xl hover:bg-slate-100 transition">
                                         <i data-lucide="bell" class="w-5 h-5 text-slate-600"></i>
-                                        ${this.state.notificationHistory.length > 0 ? `<span class="absolute top-0 right-0 w-5 h-5 bg-red-500 text-white text-[10px] font-black rounded-full flex items-center justify-center">${Math.min(this.state.notificationHistory.length, 9)}${this.state.notificationHistory.length > 9 ? '+' : ''}</span>` : ''}
+                                        ${(() => { const histCount = this.state.notificationHistory.length; const transferCount = this.getTransferNotificationsCount ? this.getTransferNotificationsCount() : 0; const totalBadge = histCount + transferCount; return totalBadge > 0 ? `<span class="absolute top-0 right-0 w-5 h-5 bg-red-500 text-white text-[10px] font-black rounded-full flex items-center justify-center">${Math.min(totalBadge, 9)}${totalBadge > 9 ? '+' : ''}</span>` : ''; })()}
                                     </button>
                                     <div class="flex items-center gap-2 px-3 py-1.5 bg-amber-50 rounded-full">
                                         <span class="w-2 h-2 bg-amber-500 rounded-full pulse-dot"></span>
@@ -44439,6 +44548,13 @@ Rapport généré par le système d'IA de gestion du stock
             CORE.markDirty('stockTransfers');
             CORE.markDirty('notifications');
             CORE.save(true);
+
+            // SYNC FIX: Force immediate cloud push for cross-browser transfer visibility
+            clearTimeout(CORE._cloudPushTimer);
+            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                CORE._cloudPushTimer = setTimeout(() => CORE._doCloudPush(0), 500);
+            }
+
             UI.closeModal();
             UI.toast(`📤 Transfert envoyé! ${qty} ${product.name} en attente de réception par ${destPos.name}`, 'success');
             App.rerender();
@@ -50379,15 +50495,21 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         async showPendingTransfersModal() {
-            // Pull fresh transfer data from cloud before displaying
+            // Pull fresh transfer + product data from cloud before displaying
             if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
                 try {
                     UI.toast('Chargement des transferts...', 'info', 2000);
-                    const fresh = await API.request('/sync/stockTransfers?light=1', { method: 'GET', timeout: 8000 });
+                    const [fresh, freshProducts] = await Promise.all([
+                        API.request('/sync/stockTransfers?light=1', { method: 'GET', timeout: 8000 }).catch(e => null),
+                        API.request('/sync/products?light=1', { method: 'GET', timeout: 8000 }).catch(e => null)
+                    ]);
                     if (fresh && Array.isArray(fresh.data)) {
                         CORE.db.stockTransfers = API._smartMerge(CORE.db.stockTransfers || [], fresh.data);
-                        CORE.save();
                     }
+                    if (freshProducts && Array.isArray(freshProducts.data)) {
+                        CORE.db.products = API._smartMerge(CORE.db.products || [], freshProducts.data);
+                    }
+                    CORE.save();
                 } catch(e) {
                     console.warn('[TRANSFERS] Manager cloud pull failed:', e.message);
                 }
@@ -62120,12 +62242,19 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
          */
         async _pullCriticalCollections() {
             if (!this.isAuthenticated() || !navigator.onLine) return false;
+            // PERF: Only pull the 2 truly critical collections (not products — too heavy for idle sync)
             var criticalCols = ['stockTransfers', 'notifications'];
             var merged = false;
+            var _totalT0 = performance.now();
             for (var ci = 0; ci < criticalCols.length; ci++) {
                 var col = criticalCols[ci];
+                // Time-box: stop if we've already spent >12s on critical pulls
+                if (performance.now() - _totalT0 > 12000) {
+                    console.warn('[SYNC-CRITICAL] Time-box reached (12s) — skipping remaining collections');
+                    break;
+                }
                 try {
-                    var resp = await this.request('/sync/' + col + '?light=1', { method: 'GET', timeout: 8000 });
+                    var resp = await this.request('/sync/' + col + '?light=1', { method: 'GET', timeout: 6000, retries: 0 });
                     if (resp && Array.isArray(resp.data) && resp.data.length > 0) {
                         var localArr = CORE.db[col];
                         if (!Array.isArray(localArr)) {
@@ -62332,22 +62461,41 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             }
         },
 
+        _pullEventsDepth: 0,
+        _MAX_PULL_DEPTH: 5, // Max recursive batches per pull cycle (5 × 200 = 1000 events max)
+
         /** Pull new CRDT events from server and apply them locally */
         async pullEvents() {
             if (!this.isAuthenticated() || !navigator.onLine) return false;
+            // Reset depth counter on top-level call
+            if (!this._pullEventsDepth) this._pullEventsDepth = 0;
             try {
                 var deviceId = DeviceId.get();
                 var since = CORE._eventSeqNo || 0;
+                // Guard: if seqNo looks corrupted, reset
+                if (since > Number.MAX_SAFE_INTEGER || since < 0) {
+                    console.warn('[CRDT] Corrupted seqNo=' + since + ', resetting to 0');
+                    since = 0;
+                    CORE._eventSeqNo = 0;
+                    localStorage.removeItem(CORE._eventSeqKey);
+                }
                 console.log('[CRDT] Pulling events since seqNo=' + since + ' (device=' + deviceId.slice(0, 8) + ')...');
-                var result = await this.request('/sync/events?since=' + since + '&deviceId=' + encodeURIComponent(deviceId) + '&limit=2000', {
-                    method: 'GET'
+                var result = await this.request('/sync/events?since=' + since + '&deviceId=' + encodeURIComponent(deviceId) + '&limit=200', {
+                    method: 'GET',
+                    timeout: 10000,   // 10s max — fail fast if server is slow
+                    retries: 1        // Only 1 retry (not default 2)
                 });
                 if (!result || !result.events || result.events.length === 0) {
                     if (result && typeof result.serverSeqNo === 'number') {
-                        CORE._eventSeqNo = Math.max(CORE._eventSeqNo, result.serverSeqNo);
+                        // Guard server seqNo too
+                        var srvSeq = result.serverSeqNo;
+                        if (srvSeq > 0 && srvSeq <= Number.MAX_SAFE_INTEGER) {
+                            CORE._eventSeqNo = Math.max(CORE._eventSeqNo, srvSeq);
+                        }
                         CORE.saveEventQueue();
                     }
                     console.log('[CRDT] No new remote events');
+                    this._pullEventsDepth = 0;
                     return true;
                 }
 
@@ -62363,7 +62511,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     modifiedCollections[evt.collection] = true;
                 }
 
-                if (result.serverSeqNo) {
+                if (result.serverSeqNo && result.serverSeqNo > 0 && result.serverSeqNo <= Number.MAX_SAFE_INTEGER) {
                     CORE._eventSeqNo = Math.max(CORE._eventSeqNo, result.serverSeqNo);
                 }
                 CORE.saveEventQueue();
@@ -62375,12 +62523,20 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 }
 
                 if (result.hasMore) {
-                    console.log('[CRDT] More events available, pulling next batch...');
+                    this._pullEventsDepth++;
+                    if (this._pullEventsDepth >= this._MAX_PULL_DEPTH) {
+                        console.warn('[CRDT] Max pull depth reached (' + this._MAX_PULL_DEPTH + ' batches) — stopping. Will continue next cycle.');
+                        this._pullEventsDepth = 0;
+                        return true;
+                    }
+                    console.log('[CRDT] More events available, pulling batch ' + (this._pullEventsDepth + 1) + '...');
                     return await this.pullEvents();
                 }
 
+                this._pullEventsDepth = 0;
                 return true;
             } catch(err) {
+                this._pullEventsDepth = 0;
                 console.warn('[CRDT] \u26a0 Pull events failed:', err.message || err);
                 return false;
             }
@@ -62477,14 +62633,25 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
         },
 
         /** Full CRDT sync cycle: push local events, then pull remote events */
+        _crdtConsecutiveFails: 0,
+        _crdtSkipUntil: 0,
+
         async syncEvents() {
             if (!this.isAuthenticated() || !navigator.onLine) return false;
+            // Circuit breaker: if CRDT has failed 3+ times, skip for 2 minutes
+            if (this._crdtConsecutiveFails >= 3 && Date.now() < this._crdtSkipUntil) {
+                console.log('[CRDT] Circuit breaker open — skipping sync (' + this._crdtConsecutiveFails + ' fails)');
+                return false;
+            }
             try {
                 await this.pushEvents();
                 await this.pullEvents();
+                this._crdtConsecutiveFails = 0; // reset on success
                 return true;
             } catch(err) {
-                console.warn('[CRDT] Sync cycle failed:', err.message || err);
+                this._crdtConsecutiveFails++;
+                this._crdtSkipUntil = Date.now() + Math.min(300000, 60000 * this._crdtConsecutiveFails); // 1min, 2min, 3min... max 5min
+                console.warn('[CRDT] Sync cycle failed (' + this._crdtConsecutiveFails + 'x):', err.message || err);
                 return false;
             }
         }};
@@ -62632,7 +62799,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             } catch(e) { console.warn('[INVITE] URL parse error:', e); }
 
             // === PERIODIC CLOUD SYNC (P1: smart intervals — PERF OPTIMIZED) ===
-            // Light sync every 3min (push dirty only). Full sync every 15min.
+            // Light sync every 60s (push dirty + pull critical). Full sync every 5th cycle (~5 min).
             // PERF: Skip when tab hidden. Skip syncFromApi (redundant with syncAllFromCloud).
             this._syncCycleCount = 0;
             // P3-2: Store interval ID so it can be cleared on logout/role-switch
@@ -62722,6 +62889,8 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                             if (typeof SyncIndicator !== 'undefined') SyncIndicator.show('success', 'Sync OK');
                             App._syncFailures = 0;
                             CORE._isSyncing = false;
+                            // Re-render to pick up new transfer notifications from cloud
+                            App.rerender();
                         }).catch(function(e) {
                             console.warn('[SYNC] Light sync error:', e);
                             if (typeof SyncIndicator !== 'undefined') SyncIndicator.show('error', 'Erreur sync');
@@ -62778,7 +62947,30 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         })();
                     }
                 }
-            }, 300000); // PERF: Check every 300s (5 min) instead of 60s — reduces requests by 5x
+            }, 60000); // Sync every 60s (1 min) for responsive cross-device transfers
+
+            // SYNC FIX: Pull critical collections immediately when user switches back to this tab
+            // This ensures transfers appear right away when a gestionnaire returns to the app
+            document.addEventListener('visibilitychange', function() {
+                if (document.visibilityState === 'visible' &&
+                    typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() &&
+                    CORE.state.isOnline && CORE.state.currentUser && !CORE._isSyncing) {
+                    // Throttle: don't pull if last pull was < 10s ago
+                    var now = Date.now();
+                    if (App._lastVisibilityPull && (now - App._lastVisibilityPull < 10000)) return;
+                    App._lastVisibilityPull = now;
+                    console.log('[SYNC] Tab became visible — pulling critical collections...');
+                    CORE._isSyncing = true;
+                    CORE._syncStart = now;
+                    API._pullCriticalCollections().then(function(pulled) {
+                        if (pulled) {
+                            console.log('[SYNC] Visibility pull complete — re-rendering');
+                            App.rerender();
+                        }
+                        CORE._isSyncing = false;
+                    }).catch(function() { CORE._isSyncing = false; });
+                }
+            });
         },
 
         mount(html) { if (!html || html.length < 10) { console.error('[App] mount received empty/tiny html:', html); return; }
