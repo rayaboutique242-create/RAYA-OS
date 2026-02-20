@@ -62020,13 +62020,17 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 } catch(bulkErr) {
                     // Fallback: if bulk endpoint fails (404/500), try per-collection
                     console.warn('[SYNC-DIRTY] Bulk PUT failed, falling back to per-collection:', bulkErr.message);
+                    // Large collections need more timeout for CockroachDB writes
+                    var _largeCols = { cities: 1, stockMovements: 1, products: 1, orders: 1, clients: 1 };
                     for (var pi = 0; pi < keys.length; pi++) {
                         var pcol = keys[pi];
                         var pData = collections[pcol] || [];
                         try {
+                            var _putTimeout = _largeCols[pcol] ? 90000 : 45000;
                             var putResult = await this.request('/sync/' + encodeURIComponent(pcol), {
                                 method: 'PUT',
-                                body: { data: pData }
+                                body: { data: pData },
+                                timeout: _putTimeout
                             });
                             if (putResult && typeof putResult.version === 'number') {
                                 pushedVersions[pcol] = putResult.version;
