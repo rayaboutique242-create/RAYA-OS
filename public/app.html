@@ -62719,17 +62719,17 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         + '<style>@keyframes spin{to{transform:rotate(360deg)}}</style>'
                         + '</div>';
                 }
-                // WARMUP: Ping backend first (Railway cold start can take 10-20s)
-                // Two attempts: 12s each. If both fail, skip cloud sync → use local cache.
+                // WARMUP: Ping backend first (Railway cold start can take 15-25s)
+                // 3 attempts with increasing timeouts. If all fail, skip cloud sync → use local cache.
                 (async function() {
                     var _warmBase = (API.baseUrl || _API_DEFAULT_URL).replace(/\/api\/?$/, '');
                     var _warmOk = false;
-                    var _warmAttempts = 2;
-                    var _warmTimeout = 12000; // 12s per attempt (Railway cold start is ~10-15s)
+                    var _warmAttempts = 3;
+                    var _warmTimeouts = [20000, 15000, 10000]; // 1st: 20s (cold start), 2nd: 15s, 3rd: 10s (should be warm)
 
-                    async function _pingBackend(attempt) {
+                    async function _pingBackend(timeoutMs) {
                         var ctrl = new AbortController();
-                        var timer = setTimeout(function() { ctrl.abort(); }, _warmTimeout);
+                        var timer = setTimeout(function() { ctrl.abort(); }, timeoutMs);
                         try {
                             var resp = await fetch(_warmBase + '/api/health', { method: 'GET', mode: 'cors', signal: ctrl.signal });
                             clearTimeout(timer);
@@ -62742,18 +62742,16 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
 
                     // Update loading message to show warmup status
                     var _warmMsg = document.querySelector('#app div div:last-child');
+                    var _warmMsgs = ['Démarrage du serveur...', 'Le serveur démarre, veuillez patienter...', 'Dernière tentative...'];
 
                     for (var _wi = 0; _wi < _warmAttempts; _wi++) {
                         try {
-                            if (_wi === 0) {
-                                console.log('[CLOUD-FIRST] Warming up backend...');
-                                if (_warmMsg) _warmMsg.textContent = 'Démarrage du serveur...';
-                            } else {
-                                console.log('[CLOUD-FIRST] Retry warmup (attempt ' + (_wi + 1) + '/' + _warmAttempts + ')...');
-                                if (_warmMsg) _warmMsg.textContent = 'Le serveur démarre, veuillez patienter...';
-                                await new Promise(function(r) { setTimeout(r, 2000); }); // 2s gap between attempts
+                            console.log('[CLOUD-FIRST] Warmup attempt ' + (_wi + 1) + '/' + _warmAttempts + ' (timeout: ' + (_warmTimeouts[_wi]/1000) + 's)...');
+                            if (_warmMsg) _warmMsg.textContent = _warmMsgs[_wi] || 'Connexion au serveur...';
+                            if (_wi > 0) {
+                                await new Promise(function(r) { setTimeout(r, 2000); }); // 2s gap between retries
                             }
-                            var _status = await _pingBackend(_wi);
+                            var _status = await _pingBackend(_warmTimeouts[_wi]);
                             console.log('[CLOUD-FIRST] Backend ready (' + _status + ')');
                             if (_warmMsg) _warmMsg.textContent = 'Chargement depuis le serveur...';
                             _warmOk = true;
