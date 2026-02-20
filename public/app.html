@@ -62294,7 +62294,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 var sinceISO = localStorage.getItem('raya_last_cloud_pull') || '';
                 var metaUrl = '/sync/meta' + (sinceISO ? '?since=' + encodeURIComponent(sinceISO) : '');
                 console.log('[SYNC-ALL] Checking metadata' + (sinceISO ? ' (since ' + sinceISO + ')' : ' (full)') + '...');
-                var meta = await this.request(metaUrl, { method: 'GET', timeout: 10000 });
+                var meta = await this.request(metaUrl, { method: 'GET', timeout: 8000, retries: 1 });
                 var changedCols = (meta && meta.collections) ? meta.collections : [];
                 if (changedCols.length === 0 && sinceISO) {
                     console.log('[SYNC-ALL] Nothing changed since last pull (' + (performance.now() - _pullT0).toFixed(0) + 'ms)');
@@ -62479,6 +62479,31 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     CORE._eventSeqNo = 0;
                     localStorage.removeItem(CORE._eventSeqKey);
                 }
+                // If seqNo=0 (fresh install or corruption-reset): DON'T replay all events.
+                // Instead, do a lightweight probe (limit=1) to get server's current seqNo.
+                // Full data will come from syncAllFromCloud() via REST.
+                if (since === 0) {
+                    console.log('[CRDT] seqNo=0 → probing server for current seqNo (skip full replay)...');
+                    try {
+                        var probe = await this.request('/sync/events?since=0&deviceId=' + encodeURIComponent(deviceId) + '&limit=1', {
+                            method: 'GET',
+                            timeout: 5000,
+                            retries: 0
+                        });
+                        if (probe && typeof probe.serverSeqNo === 'number' && probe.serverSeqNo > 0 && probe.serverSeqNo <= Number.MAX_SAFE_INTEGER) {
+                            CORE._eventSeqNo = probe.serverSeqNo;
+                            CORE.saveEventQueue();
+                            console.log('[CRDT] ✅ seqNo fast-forwarded to ' + probe.serverSeqNo + ' (skipped full event replay)');
+                        } else {
+                            console.log('[CRDT] No serverSeqNo in probe — will retry next cycle');
+                        }
+                    } catch(probeErr) {
+                        console.warn('[CRDT] Probe failed (will retry next cycle):', probeErr.message);
+                    }
+                    this._pullEventsDepth = 0;
+                    return false;
+                }
+
                 console.log('[CRDT] Pulling events since seqNo=' + since + ' (device=' + deviceId.slice(0, 8) + ')...');
                 var result = await this.request('/sync/events?since=' + since + '&deviceId=' + encodeURIComponent(deviceId) + '&limit=200', {
                     method: 'GET',
@@ -62694,26 +62719,39 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         + '<style>@keyframes spin{to{transform:rotate(360deg)}}</style>'
                         + '</div>';
                 }
-                // Push CRDT events first, then PULL server data, then PUSH local data up
-                API.syncEvents().then(function() {
-                    return API.syncAllFromCloud();
-                }).then(function() {
-                    console.log('[CLOUD-FIRST] ✅ Server data merged into local');
-                    CORE.save(); // Cache merged data locally
-                    // CRITICAL: Push ALL local data to server (initial sync-up)
-                    // This ensures data created before cloud-first is uploaded
-                    console.log('[CLOUD-FIRST] ☁ Pushing local data → server...');
-                    return API.syncAllToCloud();
-                }).then(function() {
-                    console.log('[CLOUD-FIRST] ✅ All data synced ↕ server ↔ client');
-                    CORE.clearDirty();
+                // WARMUP: Ping backend first (Railway cold start can take 10-15s)
+                // If backend doesn't respond, skip cloud sync entirely → use local cache
+                (async function() {
+                    try {
+                        var _warmBase = (API.baseUrl || _API_DEFAULT_URL).replace(/\/api\/?$/, '');
+                        var _warmCtrl = new AbortController();
+                        var _warmTimer = setTimeout(function() { _warmCtrl.abort(); }, 8000);
+                        console.log('[CLOUD-FIRST] Warming up backend...');
+                        var _warmResp = await fetch(_warmBase + '/api/health', { method: 'GET', mode: 'cors', signal: _warmCtrl.signal });
+                        clearTimeout(_warmTimer);
+                        console.log('[CLOUD-FIRST] Backend ready (' + _warmResp.status + ')');
+                    } catch(_warmErr) {
+                        console.warn('[CLOUD-FIRST] ⚠ Backend unreachable (cold start?) — using local cache');
+                        App._cloudFirstDone = true;
+                        App._finishInit();
+                        return;
+                    }
+                    // Backend is warm — proceed with sync
+                    try {
+                        await API.syncEvents();
+                        await API.syncAllFromCloud();
+                        console.log('[CLOUD-FIRST] ✅ Server data merged into local');
+                        CORE.save();
+                        console.log('[CLOUD-FIRST] ☁ Pushing local data → server...');
+                        await API.syncAllToCloud();
+                        console.log('[CLOUD-FIRST] ✅ All data synced ↕ server ↔ client');
+                        CORE.clearDirty();
+                    } catch(syncErr) {
+                        console.warn('[CLOUD-FIRST] ⚠ Server load failed, using local cache:', syncErr.message);
+                    }
                     App._cloudFirstDone = true;
                     App._finishInit();
-                }).catch(function(e) {
-                    console.warn('[CLOUD-FIRST] ⚠ Server load failed, using local cache:', e.message);
-                    App._cloudFirstDone = true;
-                    App._finishInit();
-                });
+                })();
             } else {
                 console.log('[CLOUD-FIRST] Offline or not authenticated → using local cache');
                 this._cloudFirstDone = true;
