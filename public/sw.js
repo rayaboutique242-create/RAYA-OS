@@ -1,5 +1,5 @@
-// RAYA OS - Service Worker v3.0
-const CACHE_NAME = 'raya-os-v7';
+// RAYA OS - Service Worker v3.1
+const CACHE_NAME = 'raya-os-v8';
 const OFFLINE_URL = '/app.html';
 
 // Resources to pre-cache
