@@ -62719,19 +62719,52 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         + '<style>@keyframes spin{to{transform:rotate(360deg)}}</style>'
                         + '</div>';
                 }
-                // WARMUP: Ping backend first (Railway cold start can take 10-15s)
-                // If backend doesn't respond, skip cloud sync entirely → use local cache
+                // WARMUP: Ping backend first (Railway cold start can take 10-20s)
+                // Two attempts: 12s each. If both fail, skip cloud sync → use local cache.
                 (async function() {
-                    try {
-                        var _warmBase = (API.baseUrl || _API_DEFAULT_URL).replace(/\/api\/?$/, '');
-                        var _warmCtrl = new AbortController();
-                        var _warmTimer = setTimeout(function() { _warmCtrl.abort(); }, 8000);
-                        console.log('[CLOUD-FIRST] Warming up backend...');
-                        var _warmResp = await fetch(_warmBase + '/api/health', { method: 'GET', mode: 'cors', signal: _warmCtrl.signal });
-                        clearTimeout(_warmTimer);
-                        console.log('[CLOUD-FIRST] Backend ready (' + _warmResp.status + ')');
-                    } catch(_warmErr) {
-                        console.warn('[CLOUD-FIRST] ⚠ Backend unreachable (cold start?) — using local cache');
+                    var _warmBase = (API.baseUrl || _API_DEFAULT_URL).replace(/\/api\/?$/, '');
+                    var _warmOk = false;
+                    var _warmAttempts = 2;
+                    var _warmTimeout = 12000; // 12s per attempt (Railway cold start is ~10-15s)
+
+                    async function _pingBackend(attempt) {
+                        var ctrl = new AbortController();
+                        var timer = setTimeout(function() { ctrl.abort(); }, _warmTimeout);
+                        try {
+                            var resp = await fetch(_warmBase + '/api/health', { method: 'GET', mode: 'cors', signal: ctrl.signal });
+                            clearTimeout(timer);
+                            return resp.status;
+                        } catch(e) {
+                            clearTimeout(timer);
+                            throw e;
+                        }
+                    }
+
+                    // Update loading message to show warmup status
+                    var _warmMsg = document.querySelector('#app div div:last-child');
+
+                    for (var _wi = 0; _wi < _warmAttempts; _wi++) {
+                        try {
+                            if (_wi === 0) {
+                                console.log('[CLOUD-FIRST] Warming up backend...');
+                                if (_warmMsg) _warmMsg.textContent = 'Démarrage du serveur...';
+                            } else {
+                                console.log('[CLOUD-FIRST] Retry warmup (attempt ' + (_wi + 1) + '/' + _warmAttempts + ')...');
+                                if (_warmMsg) _warmMsg.textContent = 'Le serveur démarre, veuillez patienter...';
+                                await new Promise(function(r) { setTimeout(r, 2000); }); // 2s gap between attempts
+                            }
+                            var _status = await _pingBackend(_wi);
+                            console.log('[CLOUD-FIRST] Backend ready (' + _status + ')');
+                            if (_warmMsg) _warmMsg.textContent = 'Chargement depuis le serveur...';
+                            _warmOk = true;
+                            break;
+                        } catch(_pingErr) {
+                            console.warn('[CLOUD-FIRST] Warmup attempt ' + (_wi + 1) + ' failed:', _pingErr.message || 'timeout');
+                        }
+                    }
+
+                    if (!_warmOk) {
+                        console.warn('[CLOUD-FIRST] ⚠ Backend unreachable after ' + _warmAttempts + ' attempts — using local cache');
                         App._cloudFirstDone = true;
                         App._finishInit();
                         return;
