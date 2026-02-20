@@ -62254,7 +62254,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     break;
                 }
                 try {
-                    var resp = await this.request('/sync/' + col + '?light=1', { method: 'GET', timeout: 6000, retries: 0 });
+                    var resp = await this.request('/sync/' + col + '?light=1', { method: 'GET', timeout: 12000, retries: 0 });
                     if (resp && Array.isArray(resp.data) && resp.data.length > 0) {
                         var localArr = CORE.db[col];
                         if (!Array.isArray(localArr)) {
@@ -62719,25 +62719,36 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         + '<style>@keyframes spin{to{transform:rotate(360deg)}}</style>'
                         + '</div>';
                 }
-                // WARMUP: Ping backend first (Railway cold start can take 15-25s)
+                // WARMUP: Ping backend (Railway cold start can take 15-25s)
                 // 3 attempts with increasing timeouts. If all fail, skip cloud sync → use local cache.
                 (async function() {
                     var _warmBase = (API.baseUrl || _API_DEFAULT_URL).replace(/\/api\/?$/, '');
                     var _warmOk = false;
                     var _warmAttempts = 3;
-                    var _warmTimeouts = [20000, 15000, 10000]; // 1st: 20s (cold start), 2nd: 15s, 3rd: 10s (should be warm)
+                    var _warmTimeouts = [20000, 15000, 10000]; // 1st: 20s (cold start), 2nd: 15s, 3rd: 10s
 
                     async function _pingBackend(timeoutMs) {
-                        var ctrl = new AbortController();
-                        var timer = setTimeout(function() { ctrl.abort(); }, timeoutMs);
-                        try {
-                            var resp = await fetch(_warmBase + '/api/health', { method: 'GET', mode: 'cors', signal: ctrl.signal });
-                            clearTimeout(timer);
-                            return resp.status;
-                        } catch(e) {
-                            clearTimeout(timer);
-                            throw e;
-                        }
+                        return new Promise(function(resolve, reject) {
+                            var done = false;
+                            var timer = setTimeout(function() {
+                                if (!done) { done = true; reject(new Error('warmup timeout (' + (timeoutMs/1000) + 's)')); }
+                            }, timeoutMs);
+                            // Use XMLHttpRequest instead of fetch — avoids Edge Tracking Prevention
+                            // blocking cross-origin fetch requests to railway.app
+                            var xhr = new XMLHttpRequest();
+                            xhr.open('GET', _warmBase + '/api/health', true);
+                            xhr.timeout = timeoutMs;
+                            xhr.onload = function() {
+                                if (!done) { done = true; clearTimeout(timer); resolve(xhr.status); }
+                            };
+                            xhr.onerror = function() {
+                                if (!done) { done = true; clearTimeout(timer); reject(new Error('network error')); }
+                            };
+                            xhr.ontimeout = function() {
+                                if (!done) { done = true; clearTimeout(timer); reject(new Error('xhr timeout')); }
+                            };
+                            xhr.send();
+                        });
                     }
 
                     // Update loading message to show warmup status
