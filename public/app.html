@@ -43135,19 +43135,22 @@ Rapport généré par le système d'IA de gestion du stock
           try {
             const currentUser = CORE.state.currentUser || {};
             const name = UI.val('mp_name').trim();
-            const categoryId = parseInt(UI.val('mp_cat') || '0', 10);
+            // Support both numeric and UUID category IDs from cloud sync
+            const rawCatVal = UI.val('mp_cat') || '';
+            const categoryId = /^\d+$/.test(rawCatVal) ? parseInt(rawCatVal, 10) : rawCatVal;
             // FORCER le POS si gestionnaire assigné à un POS
             const hasAssignedPos = currentUser.role === 'gestionnaire' && currentUser.pos;
             const rawPosVal = hasAssignedPos ? String(currentUser.pos) : String(UI.val('mp_pos') || '');
             const isMainWarehouse = rawPosVal === 'main';
-            const posId = isMainWarehouse ? null : (hasAssignedPos ? currentUser.pos : parseInt(rawPosVal || '0', 10));
+            // Support both numeric and UUID POS IDs
+            const posId = isMainWarehouse ? null : (hasAssignedPos ? currentUser.pos : (/^\d+$/.test(rawPosVal) ? parseInt(rawPosVal, 10) : rawPosVal));
             const price = Number(UI.val('mp_price') || 0);
             const stock = Number(UI.val('mp_stock') || 0);
             const minStock = Number(UI.val('mp_min') || 0);
             const barcode = UI.val('mp_barcode').trim();
             const active = UI.val('mp_active') === '1';
 
-            console.log('[CreateProduct] name:', name, 'categoryId:', categoryId, 'rawPosVal:', rawPosVal, 'isMainWarehouse:', isMainWarehouse, 'posId:', posId, 'stock:', stock);
+            console.log('[CreateProduct] name:', name, 'rawCatVal:', rawCatVal, 'categoryId:', categoryId, 'rawPosVal:', rawPosVal, 'isMainWarehouse:', isMainWarehouse, 'posId:', posId, 'stock:', stock);
 
             if (!name) return UI.toast('Le nom du produit est requis', 'warning');
             if (!categoryId) return UI.toast('Veuillez sélectionner une catégorie (créez-en une si la liste est vide)', 'warning');
