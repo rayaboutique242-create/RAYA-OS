@@ -26803,9 +26803,10 @@ Rapport généré par le système d'IA de gestion du stock
             if (String(product.posId) === strPosId) return true;
             const sm = product.posStocks || {};
             const e = sm[strPosId] ?? sm[posId] ?? null;
-            if (!e) return false;
-            const st = Number(e.stock ?? e.quantity ?? 0);
-            return (Number.isFinite(st) && st > 0) || e.assigned === true;
+            // FIX: If posStocks entry EXISTS for this POS, the product belongs here
+            // (even if stock=0 or timestamps are missing — the entry itself proves assignment)
+            if (e) return true;
+            return false;
         },
 
         state: {
@@ -41321,40 +41322,26 @@ Rapport généré par le système d'IA de gestion du stock
             if (!product) return false;
             const strPosId = String(posId);
 
-            // BUG FIX (v34): Check posStocks FIRST — if this POS has a valid posStocks entry
-            // (from a transfer reception), the product MUST be visible regardless of lockedToPosId.
-            // Previously, lockedToPosId blocked transferred products from appearing at dest POS.
+            // BUG FIX (v37): Check posStocks FIRST — if this POS has ANY posStocks entry,
+            // the product belongs here. The mere existence of the entry proves assignment
+            // (even if stock=0 or timestamps were stripped by cloud sync).
             const _stockMap = product.posStocks || {};
             const _transferEntry = _stockMap[strPosId] ?? _stockMap[posId] ?? null;
-            if (_transferEntry) {
-                const _tStock = Number(_transferEntry.stock ?? _transferEntry.quantity ?? 0);
-                if (Number.isFinite(_tStock) && _tStock > 0) return true;
-                if (_transferEntry.assigned === true) return true;
-                if (_transferEntry.lastMovement || _transferEntry.lastUpdated || _transferEntry.lastTransfer || _transferEntry.lastRestock) return true;
-            }
+            if (_transferEntry) return true;
 
-            // Si produit est verrouillé à un POS spécifique (créé par gestionnaire assigné)
-            // Only block if no valid posStocks entry for this POS (checked above)
+            // Si produit est verrouillé à un POS spécifique
             if (product.lockedToPosId && String(product.lockedToPosId) !== strPosId) {
                 return false;
             }
 
             // Si le produit a un posId défini, il appartient EXCLUSIVEMENT à ce POS
-            // sauf s'il a été explicitement transféré vers un autre POS via posStocks
             if (product.posId !== null && product.posId !== undefined) {
                 if (String(product.posId) === strPosId) return true;
-                // posStocks already checked above — if we reach here, no valid entry exists
                 return false;
             }
 
             // Pour les produits sans posId (produits globaux/main warehouse)
-            if (product.isMainWarehouse) return false; // Les produits du dépôt principal ne sont pas dans les POS
-
-            // Vérifier posStocks pour les produits globaux (already partially checked above)
-            if (_transferEntry) {
-                if (Array.isArray(_transferEntry.variants) && _transferEntry.variants.length > 0) return true;
-                if (_transferEntry.price !== undefined && _transferEntry.price !== null && _transferEntry.price !== product.price) return true;
-            }
+            if (product.isMainWarehouse) return false;
             return false;
         },
 
@@ -41550,25 +41537,16 @@ Rapport généré par le système d'IA de gestion du stock
             if (!posId) return true;
             if (!product) return false;
             const strPosId = String(posId);
-            // BUG FIX (v34): Check posStocks FIRST before lockedToPosId
+            // BUG FIX (v37): If posStocks entry EXISTS for this POS, product belongs here.
             const _stockMap = product.posStocks || {};
             const _transferEntry = _stockMap[strPosId] ?? _stockMap[posId] ?? null;
-            if (_transferEntry) {
-                const _tStock = Number(_transferEntry.stock ?? _transferEntry.quantity ?? 0);
-                if (Number.isFinite(_tStock) && _tStock > 0) return true;
-                if (_transferEntry.assigned === true) return true;
-                if (_transferEntry.lastMovement || _transferEntry.lastUpdated || _transferEntry.lastTransfer || _transferEntry.lastRestock) return true;
-            }
+            if (_transferEntry) return true;
             if (product.lockedToPosId && String(product.lockedToPosId) !== strPosId) return false;
             if (product.posId !== null && product.posId !== undefined) {
                 if (String(product.posId) === strPosId) return true;
                 return false;
             }
             if (product.isMainWarehouse) return false;
-            if (_transferEntry) {
-                if (Array.isArray(_transferEntry.variants) && _transferEntry.variants.length > 0) return true;
-                if (_transferEntry.price !== undefined && _transferEntry.price !== null && _transferEntry.price !== product.price) return true;
-            }
             return false;
         },
 
