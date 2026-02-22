@@ -29108,6 +29108,20 @@ Rapport généré par le système d'IA de gestion du stock
                                     <p class="text-slate-500 font-medium">${pos?.name || 'Tous POS'} • ${filteredProducts.length}/${totalProducts} produit(s) affichés</p>
                                 </div>
                             </div>
+                            ${/* DIAGNOSTIC VISIBLE — à retirer après debug */ ''}
+                            ${totalProducts === 0 ? `<div class="mt-2 p-3 bg-yellow-100 border border-yellow-400 rounded-xl text-xs text-yellow-800 font-mono break-all">
+                                <b>🔍 DIAGNOSTIC (temporaire):</b><br>
+                                user.pos = ${JSON.stringify(CORE.state.currentUser?.pos)} (${typeof CORE.state.currentUser?.pos})<br>
+                                user.storeId = ${JSON.stringify(CORE.state.currentUser?.storeId)} (${typeof CORE.state.currentUser?.storeId})<br>
+                                user.pointOfSaleId = ${JSON.stringify(CORE.state.currentUser?.pointOfSaleId)}<br>
+                                user.posId = ${JSON.stringify(CORE.state.currentUser?.posId)}<br>
+                                user.role = ${CORE.state.currentUser?.role}<br>
+                                posId used = ${JSON.stringify(posId)} (${typeof posId})<br>
+                                CORE.db.products.length = ${(CORE.db.products||[]).length}<br>
+                                getVisibleProducts().length = ${(CORE.getVisibleProducts()||[]).length}<br>
+                                pointsOfSale = ${JSON.stringify((CORE.db.pointsOfSale||[]).map(p=>({id:p.id,name:p.name,idType:typeof p.id})))}<br>
+                                products = ${JSON.stringify((CORE.db.products||[]).slice(0,5).map(p=>({id:p.id,name:p.name,posId:p.posId,posIdType:typeof p.posId,posStocksKeys:p.posStocks?Object.keys(p.posStocks):'none',locked:p.lockedToPosId})))}
+                            </div>` : ''}
                         </div>
                         <div class="flex gap-2 flex-wrap">
                             <button onclick="GestionnaireModule.showAddProductModal()" class="px-4 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-xl font-black text-sm hover:from-emerald-600 hover:to-teal-700 transition shadow-lg shadow-emerald-500/30 flex items-center gap-2">
