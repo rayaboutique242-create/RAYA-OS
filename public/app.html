@@ -7216,6 +7216,10 @@ select.form-input { cursor: pointer; }
                 message: qty + ' x ' + product.name + ' en provenance de ' + fromPos.name,
                 transferId: transferId,
                 posId: toPosId,
+                targetRole: 'gestionnaire',
+                targetPosId: toPosId,
+                createdByUserId: this.state.currentUser?.id || null,
+                createdByRole: this.state.currentUser?.role || null,
                 createdAt: new Date().toISOString(),
                 read: false
             });
@@ -8739,7 +8743,7 @@ select.form-input { cursor: pointer; }
         },
 
         // NOTIFICATION & ALERTS SYSTEM
-        createNotification(type, title, message, severity = 'medium', relatedTo = null, relatedId = null) {
+        createNotification(type, title, message, severity = 'medium', relatedTo = null, relatedId = null, target = {}) {
             const notification = {
                 id: CORE.uid(),
                 type, // 'stock_low', 'order_rejected', 'incident_open', 'info'
@@ -8750,7 +8754,13 @@ select.form-input { cursor: pointer; }
                 relatedId, // ID du produit/commande/livraison
                 read: false,
                 createdAt: new Date().toISOString(),
-                readAt: null
+                readAt: null,
+                // Ciblage: à qui est destinée cette notification
+                targetRole: target.role || null,       // 'manager', 'gestionnaire', 'vendeur', 'pdg', null=all
+                targetUserId: target.userId || null,   // ID utilisateur spécifique, null=all for role
+                targetPosId: target.posId || null,     // POS spécifique
+                createdByRole: this.state.currentUser?.role || null,
+                createdByUserId: this.state.currentUser?.id || null
             };
             this.db.notifications.push(notification);
             this.save();
@@ -8766,32 +8776,63 @@ select.form-input { cursor: pointer; }
             }
         },
 
-        getUnreadNotificationCount() {
-            const userPosId = this.state.currentUser?.pos || this.state.currentUser?.storeId;
+        // Vérifie si une notification est destinée à l'utilisateur actuel
+        _notificationBelongsToMe(n) {
+            const me = this.state.currentUser;
+            if (!me) return false;
+            const myRole = me.role;
+            const myId = me.id;
+            const myPosId = me.pos || me.storeId;
+
+            // Si la notification cible un userId spécifique
+            if (n.targetUserId && String(n.targetUserId) !== String(myId)) return false;
+
+            // Si la notification cible un rôle spécifique
+            if (n.targetRole && n.targetRole !== myRole) {
+                // Exception: manager et pdg voient les notifications sans targetRole
+                if (n.targetRole && myRole !== 'manager' && myRole !== 'pdg') return false;
+                if (n.targetRole && myRole === 'manager' && n.targetRole !== 'manager' && n.targetRole !== 'all') return false;
+                if (n.targetRole && myRole === 'pdg' && n.targetRole !== 'pdg' && n.targetRole !== 'all') return false;
+            }
+
+            // Si la notification cible un POS spécifique
+            if (n.posId && myPosId && String(n.posId) !== String(myPosId)) {
+                // Manager/PDG voient tout
+                if (myRole !== 'manager' && myRole !== 'pdg') return false;
+            }
+
+            // Ignorer les notifications que J'AI créées moi-même (pas intéressant)
+            if (n.createdByUserId && String(n.createdByUserId) === String(myId)) return false;
+
+            return true;
+        },
+
+        getMyNotifications() {
             const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
             return (this.db.notifications || []).filter(n => {
-                if (n.read) return false;
-                // Ignorer les notifications trop anciennes (> 30 jours)
                 if (n.createdAt && n.createdAt < thirtyDaysAgo) return false;
-                // Ignorer les notifications destinées à un autre POS
-                if (n.posId && userPosId && String(n.posId) !== String(userPosId)) {
-                    // Sauf pour le manager qui voit tout
-                    if (this.state.currentUser?.role !== 'manager' && this.state.currentUser?.role !== 'pdg') return false;
-                }
-                return true;
-            }).length;
+                return this._notificationBelongsToMe(n);
+            });
+        },
+
+        getUnreadNotificationCount() {
+            return this.getMyNotifications().filter(n => !n.read).length;
         },
 
         markAllNotificationsRead() {
-            (this.db.notifications || []).forEach(n => {
+            let count = 0;
+            this.getMyNotifications().forEach(n => {
                 if (!n.read) {
                     n.read = true;
                     n.readAt = new Date().toISOString();
+                    count++;
                 }
             });
-            this.save();
-            if (typeof App !== 'undefined' && App.rerender) App.rerender();
-            UI.toast('Toutes les notifications marquées comme lues', 'success');
+            if (count > 0) {
+                this.save();
+                if (typeof App !== 'undefined' && App.rerender) App.rerender();
+            }
+            UI.toast(count + ' notification(s) marquée(s) comme lue(s)', 'success');
         },
 
         cleanOldNotifications() {
@@ -8880,7 +8921,7 @@ select.form-input { cursor: pointer; }
         },
 
         getNotificationHistory(limit = 100) {
-            return (this.db.notifications || []).sort((a, b) =>
+            return this.getMyNotifications().sort((a, b) =>
                 new Date(b.createdAt) - new Date(a.createdAt)
             ).slice(0, limit);
         },
@@ -30832,6 +30873,10 @@ Rapport généré par le système d'IA de gestion du stock
                 details: eta ? 'Arrivée estimée: ' + new Date(eta).toLocaleString('fr-FR') : '',
                 transferId: transferId,
                 posId: destPosId,
+                targetRole: 'gestionnaire',
+                targetPosId: destPosId,
+                createdByUserId: CORE.state.currentUser?.id || null,
+                createdByRole: CORE.state.currentUser?.role || null,
                 createdAt: new Date().toISOString(),
                 read: false,
                 hasMedia: media.length > 0,
@@ -31450,7 +31495,7 @@ Rapport généré par le système d'IA de gestion du stock
                 }
             });
 
-            // Notification au POS source avec preuves
+            // Notification au POS source (manager) avec preuves
             CORE.db.notifications = CORE.db.notifications || [];
             CORE.db.notifications.push({
                 id: 'NOTIF-' + CORE.uid(),
@@ -31460,6 +31505,9 @@ Rapport généré par le système d'IA de gestion du stock
                 details: note ? 'Note: ' + note : '',
                 transferId: transferId,
                 posId: sourcePosId,
+                targetRole: 'manager',
+                createdByUserId: CORE.state.currentUser?.id || null,
+                createdByRole: CORE.state.currentUser?.role || null,
                 createdAt: new Date().toISOString(),
                 read: false,
                 hasMedia: media.length > 0,
@@ -31731,7 +31779,7 @@ Rapport généré par le système d'IA de gestion du stock
                 createdAt: new Date().toISOString()
             });
 
-            // Notification au POS source avec preuves
+            // Notification au POS source (manager) avec preuves
             CORE.db.notifications = CORE.db.notifications || [];
             CORE.db.notifications.push({
                 id: 'NOTIF-' + CORE.uid(),
@@ -31741,6 +31789,9 @@ Rapport généré par le système d'IA de gestion du stock
                 details: 'Motif: ' + reason,
                 transferId: transferId,
                 posId: sourcePosId,
+                targetRole: 'manager',
+                createdByUserId: CORE.state.currentUser?.id || null,
+                createdByRole: CORE.state.currentUser?.role || null,
                 createdAt: new Date().toISOString(),
                 read: false,
                 hasMedia: media.length > 0,
@@ -45454,6 +45505,10 @@ Rapport généré par le système d'IA de gestion du stock
                 details: `Envoyé par ${CORE.state.currentUser?.name || 'Manager'}`,
                 transferId: transferRef,
                 posId: destPosId,
+                targetRole: 'gestionnaire',
+                targetPosId: destPosId,
+                createdByUserId: CORE.state.currentUser?.id || null,
+                createdByRole: CORE.state.currentUser?.role || null,
                 createdAt: new Date().toISOString(),
                 read: false
             });
@@ -46624,6 +46679,10 @@ Rapport généré par le système d'IA de gestion du stock
                 details: `Envoyé par ${CORE.state.currentUser?.name || 'Manager'}`,
                 transferId: reference,
                 posId: posId,
+                targetRole: 'gestionnaire',
+                targetPosId: posId,
+                createdByUserId: CORE.state.currentUser?.id || null,
+                createdByRole: CORE.state.currentUser?.role || null,
                 createdAt: timestamp,
                 read: false
             });
@@ -58211,13 +58270,8 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         markAllNotificationsRead() {
-            (CORE.db.notifications || []).forEach(n => {
-                n.read = true;
-                n.readAt = new Date().toISOString();
-            });
-            CORE.save();
+            CORE.markAllNotificationsRead();
             this.refreshNotificationHistoryModal();
-            App.rerender();
         },
 
         toggleNotificationRead(id) {
