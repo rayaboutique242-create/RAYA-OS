@@ -43158,10 +43158,17 @@ Rapport généré par le système d'IA de gestion du stock
             if (price < 0 || stock < 0 || minStock < 0) return UI.toast('Valeurs invalides', 'warning');
 
             // Créer le produit avec posId strict
+            // IMPORTANT: Initialiser posStocks AVANT CORE.create() pour que le push API 
+            // envoie le stock correct au cloud (sinon posStocks:{} vide est poussé et le sync l'écrase)
+            const initialPosStocks = {};
+            if (!isMainWarehouse && posId) {
+                initialPosStocks[String(posId)] = { stock, price, lastUpdated: new Date().toISOString() };
+            }
+
             const createdData = {
                 name, categoryId, price, stock, minStock,
                 image: null, barcode: barcode || null, active,
-                posStocks: {},
+                posStocks: initialPosStocks,
                 lockedToPosId: hasAssignedPos ? posId : null
             };
             if (isMainWarehouse) {
@@ -43174,12 +43181,6 @@ Rapport généré par le système d'IA de gestion du stock
             }
 
             const created = CORE.create('products', createdData);
-
-            // Initialiser le stock pour ce POS si applicable
-            if (!isMainWarehouse && posId) {
-                created.posStocks[String(posId)] = { stock, price, lastUpdated: new Date().toISOString() };
-                CORE.save(); // Persister posStocks
-            }
 
             CORE.recordStockMovement({ productId: created.id, type: 'in', qty: stock, note: 'Stock initial (création produit)', ref: `PRD-${created.id}`, posId: posId || null });
 
@@ -45557,12 +45558,55 @@ Rapport généré par le système d'IA de gestion du stock
                     const deficit = target - posStock;
                     if (deficit > 0) {
                         const qty = Math.min(depotStock, deficit);
+                        const grpRef = `GRP-${Utils.uid('GT').slice(0, 6)}`;
+                        const grpTimestamp = new Date().toISOString();
 
-                        // Déduire le stock du dépôt principal
+                        // v38c: Déduire uniquement le stock du dépôt (pas ajouter au POS destination)
                         p.stock = depotStock - qty;
 
-                        // Créer le bon de transfert
-                        const receipt = CORE.createTransferReceipt({
+                        // Mouvement sortie du dépôt
+                        CORE.recordStockMovement({
+                            productId: p.id,
+                            type: 'out',
+                            qty: qty,
+                            ref: grpRef,
+                            note: `Réappro. groupé en attente vers ${pos.name}`,
+                            posId: null
+                        });
+
+                        // Créer le transfert PENDING — le gestionnaire doit confirmer
+                        CORE.db.stockTransfers = CORE.db.stockTransfers || [];
+                        CORE.db.stockTransfers.push({
+                            id: grpRef,
+                            productId: p._apiId || p.id,
+                            productName: p.name,
+                            productSku: p.barcode || null,
+                            productPrice: p.price || 0,
+                            productCategory: p.category || p.categoryId || null,
+                            qty: qty,
+                            sourcePosId: 'main_depot',
+                            sourcePosName: 'Dépôt principal',
+                            destPosId: parseInt(posId),
+                            destPosName: pos.name,
+                            reason: `Réappro. groupé automatique - ${pos.name}`,
+                            status: 'pending',
+                            createdBy: CORE.state.currentUser?.id,
+                            createdByName: CORE.state.currentUser?.name || 'Manager',
+                            createdAt: grpTimestamp,
+                            receivedAt: null,
+                            receivedBy: null,
+                            receivedByName: null,
+                            meta: {
+                                source: 'grouped_transfer',
+                                velocity: velocity,
+                                stockoutRisk: stockout.risk,
+                                transferType: 'main_depot_transfer',
+                                createdFrom: 'manager_grouped_transfer'
+                            }
+                        });
+
+                        // Créer aussi un transferReceipt pour compatibilité
+                        CORE.createTransferReceipt({
                             productId: p._apiId || p.id,
                             productName: p.name,
                             productSku: p.barcode || null,
@@ -45574,7 +45618,7 @@ Rapport généré par le système d'IA de gestion du stock
                             toPosId: parseInt(posId),
                             toPosName: pos.name,
                             note: `Réappro. groupé automatique - ${pos.name}`,
-                            reference: `GRP-${Utils.uid('GT').slice(0, 6)}`,
+                            reference: grpRef,
                             meta: {
                                 source: 'grouped_transfer',
                                 velocity: velocity,
@@ -45584,30 +45628,9 @@ Rapport généré par le système d'IA de gestion du stock
                             }
                         });
 
-                        if (receipt) {
-                            // Enregistrer le mouvement de stock
-                            CORE.recordStockMovement({
-                                type: 'main_depot_transfer',
-                                productId: p.id,
-                                quantity: qty,
-                                posId: null,
-                                fromPosId: null,
-                                toPosId: parseInt(posId),
-                                notes: `Réappro. groupé - ${pos.name}`,
-                                reason: 'main_depot_transfer',
-                                document: receipt.reference,
-                                timestamp: new Date().toISOString(),
-                                meta: {
-                                    source: 'grouped_transfer',
-                                    receiptId: receipt.id,
-                                    direction: 'out',
-                                    status: 'pending'
-                                }
-                            });
-
-                            transferCount++;
-                            totalQty += qty;
-                        }
+                        p.updatedAt = grpTimestamp;
+                        transferCount++;
+                        totalQty += qty;
                     }
                 }
             });
@@ -46456,20 +46479,11 @@ Rapport généré par le système d'IA de gestion du stock
                 return;
             }
 
-            // Mettre à jour les stocks
+            // v38c: NE PAS ajouter le stock au POS destination — attendre la validation de réception
+            // Déduire uniquement le stock du dépôt principal (réservé pour transfert)
             product.stock = depotStock - qty;
 
-            if (!product.posStocks) product.posStocks = {};
-            if (!product.posStocks[posId]) {
-                product.posStocks[posId] = {
-                    stock: 0,
-                    lastUpdated: new Date().toISOString()
-                };
-            }
-
             const timestamp = new Date().toISOString();
-            product.posStocks[posId].lastUpdated = timestamp;
-
             const cloneMedia = () => media.map(item => ({ ...item }));
 
             const movementMeta = {
@@ -46493,7 +46507,50 @@ Rapport généré par le système d'IA de gestion du stock
                 }
             }
 
-            const receipt = CORE.createTransferReceipt({
+            // Mouvement sortie du dépôt (réservation)
+            CORE.recordStockMovement({
+                productId,
+                type: 'out',
+                qty: qty,
+                ref: reference,
+                note: `${note ? note + ' - ' : ''}Transfert en attente vers ${pos.name}`,
+                posId: null
+            });
+
+            // Créer le transfert avec status 'pending' — le gestionnaire du POS destinataire devra confirmer la réception
+            CORE.db.stockTransfers = CORE.db.stockTransfers || [];
+            CORE.db.stockTransfers.push({
+                id: reference,
+                productId: product._apiId || product.id,
+                productName: product.name,
+                productSku: product.barcode || null,
+                productPrice: product.price || 0,
+                productCategory: product.category || product.categoryId || null,
+                qty: qty,
+                sourcePosId: 'main_depot',
+                sourcePosName: 'Dépôt principal',
+                destPosId: posId,
+                destPosName: pos.name,
+                reason: note || 'Transfert Dépôt Principal → POS',
+                status: 'pending',
+                createdBy: CORE.state.currentUser?.id,
+                createdByName: CORE.state.currentUser?.name || 'Manager',
+                createdAt: timestamp,
+                receivedAt: null,
+                receivedBy: null,
+                receivedByName: null,
+                trackingNumber: trackingNumber || null,
+                estimatedArrivalAt: movementMeta.estimatedArrivalAt || null,
+                attachments: cloneMedia(),
+                meta: {
+                    transferType: 'main_depot_transfer',
+                    createdFrom: 'manager_main_transfer',
+                    recommended
+                }
+            });
+
+            // Créer aussi un transferReceipt pour compatibilité
+            CORE.createTransferReceipt({
                 reference,
                 productId: product._apiId || product.id,
                 productName: product.name,
@@ -46516,90 +46573,38 @@ Rapport généré par le système d'IA de gestion du stock
                 }
             });
 
-            const baseMovementMeta = {
-                ...movementMeta,
-                receiptId: receipt?.id || null,
-                status: 'pending'
-            };
-
-            const outboundMovement = CORE.recordStockMovement({
-                type: 'main_depot_transfer',
-                productId,
-                quantity: qty,
-                posId: null,
-                fromPosId: null,
-                toPosId: posId,
-                notes: note,
-                reason: 'main_depot_transfer',
-                document: reference,
-                timestamp,
-                meta: baseMovementMeta
+            // Notification pour le gestionnaire destinataire
+            CORE.db.notifications = CORE.db.notifications || [];
+            CORE.db.notifications.push({
+                id: 'NOTIF-' + CORE.uid(),
+                type: 'transfer_incoming',
+                title: '📦 Transfert entrant du Dépôt Principal',
+                message: `${qty} x ${product.name} en provenance du Dépôt Principal`,
+                details: `Envoyé par ${CORE.state.currentUser?.name || 'Manager'}`,
+                transferId: reference,
+                posId: posId,
+                createdAt: timestamp,
+                read: false
             });
-
-            if (outboundMovement) {
-                outboundMovement.status = 'pending';
-                outboundMovement.meta = baseMovementMeta;
-                outboundMovement.timestamp = timestamp;
-                outboundMovement.createdAt = timestamp;
-            }
-
-            const inboundMeta = {
-                ...baseMovementMeta,
-                direction: 'in',
-                attachments: cloneMedia()
-            };
-
-            const inboundMovement = CORE.recordStockMovement({
-                type: 'main_depot_transfer',
-                productId,
-                quantity: qty,
-                posId,
-                fromPosId: null,
-                toPosId: posId,
-                notes: note,
-                reason: 'main_depot_transfer',
-                document: reference,
-                timestamp,
-                meta: inboundMeta
-            });
-
-            if (inboundMovement) {
-                inboundMovement.status = 'pending';
-                inboundMovement.meta = inboundMeta;
-                inboundMovement.timestamp = timestamp;
-                inboundMovement.createdAt = timestamp;
-            }
-
-            if (receipt) {
-                receipt.meta = {
-                    ...(receipt.meta || {}),
-                    movements: {
-                        outboundId: outboundMovement?.id || null,
-                        inboundId: inboundMovement?.id || null
-                    }
-                };
-                receipt.updatedAt = timestamp;
-            }
 
             // FIX: Set product.updatedAt so _smartMerge preserves the stock change
             product.updatedAt = timestamp;
 
             CORE.markDirty('products');
             CORE.markDirty('stockMovements');
+            CORE.markDirty('stockTransfers');
             CORE.markDirty('transferReceipts');
-            // FIX: Use save(true) for IMMEDIATE localStorage write (not debounced)
-            // Previously used save() which debounces 1s — refresh before write = data loss
+            CORE.markDirty('notifications');
             CORE.save(true);
 
-            // FIX: Force immediate cloud push (500ms) so destination POS sees the transfer
-            // Without this, cloud push is debounced 3s and stock reverts on refresh
+            // Force immediate cloud push so destination POS sees the transfer
             clearTimeout(CORE._cloudPushTimer);
             if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
                 CORE._cloudPushTimer = setTimeout(() => CORE._doCloudPush(0), 500);
             }
 
             UI.closeModal();
-            UI.toast(`✓ ${qty} ${product.name} transféré(s) du dépôt principal à ${pos.name}`, 'success');
+            UI.toast(`📤 Transfert envoyé! ${qty} ${product.name} en attente de réception par ${pos.name}`, 'success');
             ManagerModule._mainTransferMedia = [];
             App.rerender();
         },
