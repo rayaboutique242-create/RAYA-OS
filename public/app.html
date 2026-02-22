@@ -26919,14 +26919,45 @@ Rapport généré par le système d'IA de gestion du stock
 
             // Utiliser la même logique que ManagerModule.productBelongsToPos()
             // pour que le gestionnaire et le manager voient les mêmes produits
-            const products = (CORE.getVisibleProducts() || []).filter(p => {
+            const _rawProducts = CORE.db.products || [];
+            const _allVisible = CORE.getVisibleProducts() || [];
+            const _user = CORE.state.currentUser;
+            console.log('[DIAG-PRODUCTS] FULL STATE:', {
+                posId: posId,
+                posIdType: typeof posId,
+                userPos: _user?.pos,
+                userStoreId: _user?.storeId,
+                userPointOfSaleId: _user?.pointOfSaleId,
+                userRole: _user?.role,
+                userName: _user?.name,
+                rawProductsCount: _rawProducts.length,
+                visibleProductsCount: _allVisible.length
+            });
+            // Log ALL raw products (there should be very few)
+            _rawProducts.forEach((p, i) => {
+                const belongs = (typeof ManagerModule !== 'undefined' && ManagerModule.productBelongsToPos) 
+                    ? ManagerModule.productBelongsToPos(p, posId) : 'N/A';
+                console.log('[DIAG-PRODUCTS] RAW[' + i + ']:', { 
+                    id: p.id, name: p.name, posId: p.posId, posIdType: typeof p.posId,
+                    lockedToPosId: p.lockedToPosId, 
+                    posStocksKeys: p.posStocks ? Object.keys(p.posStocks) : 'none', 
+                    posStocksDetail: p.posStocks ? JSON.stringify(p.posStocks).substring(0, 300) : 'none',
+                    stock: p.stock,
+                    canAccess: CORE.canAccess('product', p),
+                    belongsToPos: belongs
+                });
+            });
+            const products = _allVisible.filter(p => {
                 if (typeof ManagerModule !== 'undefined' && ManagerModule.productBelongsToPos) {
-                    return ManagerModule.productBelongsToPos(p, posId);
+                    const result = ManagerModule.productBelongsToPos(p, posId);
+                    if (!result) console.log('[DIAG-FILTER] REJECTED by productBelongsToPos:', p.id, p.name);
+                    return result;
                 }
                 // Fallback si ManagerModule non disponible
                 if (String(p.posId) === String(posId)) return true;
                 if (p.posStocks && p.posStocks[posId]) return true;
                 if (p.posStocks && p.posStocks[String(posId)]) return true;
+                console.log('[DIAG-FILTER] REJECTED by fallback:', p.id, p.name);
                 return false;
             }).map(p => {
                 // Enrichir le produit avec le stock du POS actuel
@@ -26938,6 +26969,19 @@ Rapport généré par le système d'IA de gestion du stock
                     displayPrice: posPrice
                 };
             });
+
+            // SAFETY NET: If 0 products after filter but raw products exist, show ALL with warning
+            if (products.length === 0 && _rawProducts.length > 0) {
+                console.error('[DIAG-PRODUCTS] ❌ FILTER PRODUCED 0 PRODUCTS! Showing all ' + _rawProducts.length + ' raw products as safety net');
+                const fallbackProducts = _rawProducts.filter(p => !p._deleted && !p.isMainWarehouse).map(p => {
+                    const posStock = p.posStocks ? (Object.values(p.posStocks).reduce((sum, s) => sum + (Number(s?.stock) || 0), 0)) : (p.stock || 0);
+                    return { ...p, stock: posStock, displayPrice: p.price || 0, _safetyNet: true };
+                });
+                if (fallbackProducts.length > 0) {
+                    this.setCachedData('products', fallbackProducts);
+                    return fallbackProducts;
+                }
+            }
 
             this.setCachedData('products', products);
             return products;
