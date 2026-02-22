@@ -1871,7 +1871,10 @@ select.form-input { cursor: pointer; }
                     const digest = await window.crypto.subtle.digest('SHA-256', data);
                     return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
                 }
-            } catch (err) {}
+            } catch (err) {
+                console.warn('[SECURITY] crypto.subtle failed, using weak fallback hash:', err?.message);
+            }
+            console.warn('[SECURITY] crypto.subtle unavailable — using weak fallback hash. Ensure HTTPS is enabled.');
             return this.md5Sync(input);
         },
         md5Sync(str) {
@@ -4749,8 +4752,157 @@ select.form-input { cursor: pointer; }
                 }
             }
 
+            // MIGRATION v2.9: Clean demo/fake notifications (now handled by _sanitizeFakeData)
+            if (!localStorage.getItem('raya_cleanup_v2_9')) {
+                console.log('[MIGRATION v2.9] Cleaning demo/fake notifications...');
+                let cleaned29 = this._sanitizeFakeData();
+                localStorage.setItem('raya_cleanup_v2_9', '1');
+                if (cleaned29) {
+                    ['notifications'].forEach(col => {
+                        if (this.db[col]) this.markDirty(col);
+                    });
+                    this.save();
+                    console.log('[MIGRATION v2.9] ✅ Notification cleanup complete & marked for cloud push');
+                } else {
+                    console.log('[MIGRATION v2.9] No fake notifications found');
+                }
+            }
+
+            // MIGRATION v3.0: Fix NaN IDs and deduplicate products (cloud UUID duplicates)
+            if (!localStorage.getItem('raya_cleanup_v3_0')) {
+                console.log('[MIGRATION v3.0] Fixing NaN IDs and deduplicating products...');
+                let cleaned30 = false;
+                try {
+                    // 1. Remove products with NaN, null, or undefined IDs
+                    if (this.db.products && this.db.products.length > 0) {
+                        const before = this.db.products.length;
+                        this.db.products = this.db.products.filter(p => {
+                            if (p.id === null || p.id === undefined) return false;
+                            if (typeof p.id === 'number' && !Number.isFinite(p.id)) return false; // NaN, Infinity
+                            return true;
+                        });
+                        if (this.db.products.length < before) {
+                            cleaned30 = true;
+                            console.log('[v3.0] Removed', before - this.db.products.length, 'products with invalid IDs');
+                        }
+                    }
+                    // 2. Deduplicate: if a local product has _apiId matching a cloud product's id,
+                    //    keep only the local one (with integer id + _apiId) and discard the cloud duplicate (UUID id)
+                    if (this.db.products && this.db.products.length > 0) {
+                        const apiIdSet = new Set();
+                        this.db.products.forEach(p => { if (p._apiId) apiIdSet.add(String(p._apiId)); });
+                        if (apiIdSet.size > 0) {
+                            const before = this.db.products.length;
+                            this.db.products = this.db.products.filter(p => {
+                                // If this product's id is a UUID AND another product already claims it as _apiId, it's a duplicate
+                                if (typeof p.id === 'string' && apiIdSet.has(p.id)) {
+                                    // Check there's actually a local item with this as _apiId
+                                    const localOwner = this.db.products.find(q => q !== p && String(q._apiId) === p.id);
+                                    if (localOwner) {
+                                        // Merge any cloud-only fields into the local owner before removing
+                                        Object.keys(p).forEach(k => {
+                                            if (localOwner[k] === undefined || localOwner[k] === null) {
+                                                localOwner[k] = p[k];
+                                            }
+                                        });
+                                        return false; // remove cloud duplicate
+                                    }
+                                }
+                                return true;
+                            });
+                            if (this.db.products.length < before) {
+                                cleaned30 = true;
+                                console.log('[v3.0] Removed', before - this.db.products.length, 'duplicate cloud products');
+                            }
+                        }
+                    }
+                    // 3. Same dedup for other UUID collections (orders, clients, categories, deliveries)
+                    ['orders', 'clients', 'categories', 'deliveries'].forEach(col => {
+                        if (this.db[col] && this.db[col].length > 0) {
+                            const apiIdSet = new Set();
+                            this.db[col].forEach(item => { if (item._apiId) apiIdSet.add(String(item._apiId)); });
+                            if (apiIdSet.size > 0) {
+                                const before = this.db[col].length;
+                                this.db[col] = this.db[col].filter(item => {
+                                    if (typeof item.id === 'string' && apiIdSet.has(item.id)) {
+                                        const localOwner = this.db[col].find(q => q !== item && String(q._apiId) === item.id);
+                                        if (localOwner) return false;
+                                    }
+                                    return true;
+                                });
+                                if (this.db[col].length < before) {
+                                    cleaned30 = true;
+                                    console.log('[v3.0] Removed', before - this.db[col].length, 'duplicate cloud', col);
+                                }
+                            }
+                        }
+                    });
+                } catch(e) { console.warn('[MIGRATION v3.0] Error:', e); }
+                localStorage.setItem('raya_cleanup_v3_0', '1');
+                if (cleaned30) {
+                    ['products', 'orders', 'clients', 'categories', 'deliveries'].forEach(col => {
+                        if (this.db[col]) this.markDirty(col);
+                    });
+                    this.save();
+                    console.log('[MIGRATION v3.0] ✅ Deduplication complete & marked for cloud push');
+                } else {
+                    console.log('[MIGRATION v3.0] No duplicates or invalid IDs found');
+                }
+            }
+
             // MIGRATION: Initialiser posStocks pour les produits existants
             this.migrateProductsToPosStocks();
+
+            // MIGRATION v3.1: Strip base64 bloat from localStorage
+            if (!localStorage.getItem('raya_cleanup_v3_1')) {
+                console.log('[MIGRATION v3.1] Stripping base64 images and reducing event queue...');
+                try {
+                    var stripped31 = 0;
+                    // Strip base64 from products
+                    if (Array.isArray(this.db.products)) {
+                        this.db.products.forEach(function(p) {
+                            if (p.image && typeof p.image === 'string' && p.image.startsWith('data:')) {
+                                p.image = '';
+                                stripped31++;
+                            }
+                        });
+                    }
+                    // Clear productImages entirely (base64 blobs)
+                    if (Array.isArray(this.db.productImages) && this.db.productImages.length > 0) {
+                        stripped31 += this.db.productImages.length;
+                        this.db.productImages = [];
+                    }
+                    // Trim event queue
+                    if (this._eventQueue && this._eventQueue.length > 800) {
+                        var before = this._eventQueue.length;
+                        this._eventQueue = this._eventQueue.slice(this._eventQueue.length - 800);
+                        stripped31 += (before - this._eventQueue.length);
+                        this.saveEventQueue();
+                    }
+                    // Trim oversized posDataByLocation sub-arrays
+                    if (this.db.posDataByLocation) {
+                        Object.keys(this.db.posDataByLocation).forEach(function(posKey) {
+                            var pd = CORE.db.posDataByLocation[posKey];
+                            if (pd) {
+                                ['orders','clients','deliveries','transactions'].forEach(function(k) {
+                                    if (Array.isArray(pd[k]) && pd[k].length > 150) {
+                                        stripped31 += (pd[k].length - 150);
+                                        pd[k] = pd[k].slice(0, 150);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                    localStorage.setItem('raya_cleanup_v3_1', '1');
+                    if (stripped31 > 0) {
+                        this.save(true);
+                        console.log('[MIGRATION v3.1] ✅ Stripped ' + stripped31 + ' bloat items');
+                    } else {
+                        console.log('[MIGRATION v3.1] No bloat found');
+                    }
+                } catch(e) { console.warn('[MIGRATION v3.1] Error:', e); localStorage.setItem('raya_cleanup_v3_1', '1'); }
+            }
+
             // CRDT: Load event queue
             this.loadEventQueue();
         },
@@ -4882,6 +5034,26 @@ select.form-input { cursor: pointer; }
                         return true;
                     });
                     if (this.db.stockMovements.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.stockMovements.length, 'fake stock movements'); }
+                }
+
+                // Fake/demo notifications — remove test-prefixed, demo-prefixed, and old stale (>7 days)
+                if (this.db.notifications && this.db.notifications.length > 0) {
+                    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+                    const before = this.db.notifications.length;
+                    this.db.notifications = this.db.notifications.filter(n => {
+                        const id = (n.id || '').toString();
+                        if (id.startsWith('demo_') || id.startsWith('test_')) return false;
+                        const title = (n.title || '').toLowerCase();
+                        const msg = (n.message || '').toLowerCase();
+                        // Remove notifications referencing fake data patterns
+                        if (title.includes('marcel bakala') || title.includes('sylvie moukoko')) return false;
+                        if (msg.includes('marcel bakala') || msg.includes('sylvie moukoko')) return false;
+                        if (/cmd-00(0[1-9]|1[0-4])/.test(msg) || /cmd-00(0[1-9]|1[0-4])/.test(title)) return false;
+                        // Remove old stale notifications (>7 days)
+                        if (n.createdAt && new Date(n.createdAt) < cutoff) return false;
+                        return true;
+                    });
+                    if (this.db.notifications.length < before) { cleaned = true; console.log('[SANITIZE] Removed', before - this.db.notifications.length, 'fake/old notifications'); }
                 }
 
                 // AUTO-RECOVERY: Ensure default categories exist so product creation is never blocked
@@ -5074,7 +5246,28 @@ select.form-input { cursor: pointer; }
             try {
                 localStorage.setItem(this._eventQueueKey, JSON.stringify(this._eventQueue));
                 localStorage.setItem(this._eventSeqKey, String(this._eventSeqNo));
-            } catch(e) { console.warn('[CRDT] Event queue save failed:', e.message); }
+            } catch(e) {
+                // On quota error: aggressively trim event queue and retry
+                if (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014) {
+                    console.warn('[CRDT] Event queue save quota exceeded (' + this._eventQueue.length + ' events). Trimming...');
+                    // Keep only the last 500 events (from 5000 max)
+                    if (this._eventQueue.length > 500) {
+                        this._eventQueue = this._eventQueue.slice(this._eventQueue.length - 500);
+                    }
+                    try {
+                        localStorage.setItem(this._eventQueueKey, JSON.stringify(this._eventQueue));
+                        localStorage.setItem(this._eventSeqKey, String(this._eventSeqNo));
+                        console.warn('[CRDT] ✓ Event queue saved after trimming to ' + this._eventQueue.length + ' events');
+                    } catch(e2) {
+                        // Still failing — clear event queue entirely (events are synced to cloud)
+                        console.warn('[CRDT] Still over quota — clearing event queue (data is synced to cloud)');
+                        this._eventQueue = [];
+                        try { localStorage.setItem(this._eventQueueKey, '[]'); } catch(e3) {}
+                    }
+                } else {
+                    console.warn('[CRDT] Event queue save failed:', e.message);
+                }
+            }
         },
 
         /** Record a CRDT event with HLC timestamp and field-level detail */
@@ -5116,9 +5309,9 @@ select.form-input { cursor: pointer; }
 
             this._eventQueue.push(event);
 
-            // Cap queue size: if > 5000 events, drop oldest 1000
-            if (this._eventQueue.length > 5000) {
-                this._eventQueue = this._eventQueue.slice(this._eventQueue.length - 4000);
+            // Cap queue size: if > 1000 events, keep newest 800
+            if (this._eventQueue.length > 1000) {
+                this._eventQueue = this._eventQueue.slice(this._eventQueue.length - 800);
             }
 
             this.saveEventQueue();
@@ -5137,6 +5330,143 @@ select.form-input { cursor: pointer; }
                 self._productIndex = null;
                 self._userIndex = null;
                 var _st0 = performance.now();
+
+                // ── PROACTIVE CAPS: Trim high-volume collections BEFORE serialization ──
+                // This prevents quota errors entirely instead of reacting to them.
+                var _capCollection = function(col, maxItems) {
+                    if (Array.isArray(self.db[col]) && self.db[col].length > maxItems) {
+                        self.db[col] = self.db[col].slice(0, maxItems);
+                    }
+                };
+                // Logs & history: keep only recent entries (cloud has full history)
+                _capCollection('auditLogs', 200);
+                _capCollection('activityLogs', 200);
+                _capCollection('systemLogs', 50);
+                _capCollection('auditTrail', 100);
+                _capCollection('complianceLogs', 50);
+                _capCollection('accessLogs', 50);
+                _capCollection('dataModificationLogs', 50);
+                _capCollection('deletionLogs', 50);
+                _capCollection('exportLogs', 50);
+                _capCollection('complianceReports', 20);
+                _capCollection('alertHistory', 50);
+                _capCollection('incidentHistory', 50);
+                _capCollection('suspensionHistory', 50);
+                _capCollection('importExportHistory', 50);
+                _capCollection('messageLog', 50);
+                _capCollection('notificationHistory', 50);
+                _capCollection('paymentHistory', 50);
+                _capCollection('paymentWebhooks', 20);
+                _capCollection('dailyDigestLogs', 20);
+                _capCollection('approvalAuditTrail', 100);
+                // Transactional: keep more but still bounded
+                _capCollection('stockMovements', 200);
+                _capCollection('financialTransactions', 300);
+                _capCollection('notifications', 100);
+                _capCollection('deposits', 200);
+                _capCollection('mobilePayments', 100);
+                _capCollection('paymentInvoices', 100);
+                // Core collections: keep bounded (cloud is source of truth)
+                _capCollection('orders', 200);
+                _capCollection('clients', 300);
+                _capCollection('deliveries', 150);
+                _capCollection('returns', 100);
+                _capCollection('stockTransfers', 50);
+                _capCollection('transferReceipts', 50);
+                _capCollection('purchaseOrders', 50);
+                _capCollection('incidents', 50);
+                _capCollection('shifts', 50);
+                _capCollection('timeOff', 50);
+                _capCollection('orderApprovals', 50);
+                _capCollection('returnJustifications', 50);
+                _capCollection('expiryAlerts', 50);
+                _capCollection('backups', 10);
+                // Analytics (regenerable from cloud)
+                _capCollection('stockPredictions', 50);
+                _capCollection('stockAnalysisABC', 50);
+                _capCollection('reorderSuggestions', 50);
+                _capCollection('stockTrendHistory', 50);
+                _capCollection('generatedReports', 20);
+                // ── BASE64 IMAGE STRIPPING ──
+                // Product images as base64 are the #1 bloat cause (500KB-2MB each).
+                // Strip them before serialization — cloud has the originals.
+                _capCollection('productImages', 0); // Never store images in localStorage
+                if (Array.isArray(self.db.products)) {
+                    self.db.products.forEach(function(p) {
+                        if (p.image && typeof p.image === 'string' && p.image.startsWith('data:')) {
+                            p.image = ''; // Strip base64, will be re-fetched from cloud
+                        }
+                    });
+                }
+                // ── TRANSFER MEDIA STRIPPING (v34, enhanced v36) ──
+                // sendMedia and receptionMedia contain raw base64 data blobs (500KB-5MB each).
+                // These bloat localStorage AND cause PUT timeouts (30s) on cloud sync.
+                // Strip data: URIs — keep only metadata (type, name, date).
+                var _stripTransferMedia = function(arr) {
+                    if (!Array.isArray(arr)) return;
+                    arr.forEach(function(t) {
+                        // Strip known media arrays
+                        ['sendMedia', 'receptionMedia', 'rejectionMedia', 'media', 'photos', 'attachments'].forEach(function(field) {
+                            if (Array.isArray(t[field])) {
+                                t[field] = t[field].map(function(m) {
+                                    if (m && m.data && typeof m.data === 'string' && m.data.length > 500) {
+                                        return { type: m.type, name: m.name, date: m.date, stripped: true };
+                                    }
+                                    return m;
+                                });
+                            }
+                        });
+                        // v36: Strip ANY string field > 5KB (likely base64 or embedded HTML)
+                        var tKeys = Object.keys(t);
+                        for (var tk = 0; tk < tKeys.length; tk++) {
+                            var val = t[tKeys[tk]];
+                            if (typeof val === 'string' && val.length > 5000 && tKeys[tk] !== 'id' && tKeys[tk] !== '_id' && tKeys[tk] !== '_apiId') {
+                                if (val.startsWith('data:') || val.startsWith('blob:')) {
+                                    t[tKeys[tk]] = '[stripped-media]';
+                                } else if (val.length > 20000) {
+                                    t[tKeys[tk]] = val.substring(0, 200) + '...[truncated]';
+                                }
+                            }
+                        }
+                    });
+                };
+                _stripTransferMedia(self.db.stockTransfers);
+                _stripTransferMedia(self.db.transferReceipts);
+                // v36: Also strip stockMovements large fields
+                if (Array.isArray(self.db.stockMovements)) {
+                    self.db.stockMovements.forEach(function(m) {
+                        if (m.details && typeof m.details === 'string' && m.details.length > 1000) {
+                            m.details = m.details.substring(0, 200) + '...[truncated]';
+                        }
+                        // Remove any embedded product snapshots
+                        if (m.productSnapshot) delete m.productSnapshot;
+                        if (m.beforeSnapshot) delete m.beforeSnapshot;
+                        if (m.afterSnapshot) delete m.afterSnapshot;
+                    });
+                }
+                // v36: Cap stockMovements more aggressively and sort by date (newest first)
+                if (Array.isArray(self.db.stockMovements) && self.db.stockMovements.length > 200) {
+                    self.db.stockMovements.sort(function(a, b) {
+                        return new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0);
+                    });
+                    self.db.stockMovements = self.db.stockMovements.slice(0, 200);
+                }
+                // Trim posDataByLocation sub-collections (ALL sub-arrays, not just 3)
+                if (self.db.posDataByLocation) {
+                    Object.keys(self.db.posDataByLocation).forEach(function(posKey) {
+                        var posData = self.db.posDataByLocation[posKey];
+                        if (posData) {
+                            if (Array.isArray(posData.orders) && posData.orders.length > 100) posData.orders = posData.orders.slice(0, 100);
+                            if (Array.isArray(posData.clients) && posData.clients.length > 150) posData.clients = posData.clients.slice(0, 150);
+                            if (Array.isArray(posData.deliveries) && posData.deliveries.length > 100) posData.deliveries = posData.deliveries.slice(0, 100);
+                            if (Array.isArray(posData.transactions) && posData.transactions.length > 100) posData.transactions = posData.transactions.slice(0, 100);
+                            if (Array.isArray(posData.stockMovements) && posData.stockMovements.length > 100) posData.stockMovements = posData.stockMovements.slice(0, 100);
+                            if (Array.isArray(posData.notifications) && posData.notifications.length > 50) posData.notifications = posData.notifications.slice(0, 50);
+                            if (Array.isArray(posData.activityLogs) && posData.activityLogs.length > 50) posData.activityLogs = posData.activityLogs.slice(0, 50);
+                        }
+                    });
+                }
+
                 var payload = {
                     state: { ...self.state, currentUser: self.state.currentUser ? { id: self.state.currentUser.id } : null },
                     db: self.db,
@@ -5144,7 +5474,113 @@ select.form-input { cursor: pointer; }
                 };
                 self._syncGlobalFromTenant();
                 self.saveGlobal();
-                localStorage.setItem(self.getStorageKey(), JSON.stringify(payload));
+
+                // ── SIZE DIAGNOSTIC (only when payload > 3MB) ──
+                var jsonPayload = JSON.stringify(payload);
+                if (jsonPayload.length > 3 * 1024 * 1024) {
+                    console.warn('[SAVE-DIAG] Payload: ' + (jsonPayload.length / 1024).toFixed(0) + 'KB. Top collections:');
+                    var _sizes = [];
+                    Object.keys(self.db).forEach(function(k) {
+                        var s = JSON.stringify(self.db[k] || null);
+                        if (s && s.length > 5000) _sizes.push({ name: k, kb: (s.length / 1024).toFixed(1) });
+                    });
+                    _sizes.sort(function(a, b) { return parseFloat(b.kb) - parseFloat(a.kb); });
+                    _sizes.slice(0, 10).forEach(function(s) { console.warn('  ' + s.name + ': ' + s.kb + 'KB'); });
+                }
+
+                // ── QuotaExceededError handling ──
+                // localStorage has a ~5-10MB limit. When collections grow large
+                // (stockMovements, orders, logs...), the serialized payload exceeds it.
+                // Strategy: try full save → on quota error, progressively strip
+                // low-priority collections from the payload and retry. Cloud is the
+                // source of truth — stripped data will be re-fetched on next sync.
+                if (!jsonPayload) jsonPayload = JSON.stringify(payload);
+                try {
+                    localStorage.setItem(self.getStorageKey(), jsonPayload);
+                } catch(quotaErr) {
+                    if (quotaErr.name === 'QuotaExceededError' || quotaErr.code === 22 || quotaErr.code === 1014) {
+                        console.warn('[SAVE] ⚠ localStorage quota exceeded (' + (jsonPayload.length / 1024).toFixed(0) + 'KB). Pruning non-critical data...');
+                        // Tiers of collections to strip, from least to most critical
+                        var _pruneTiers = [
+                            // Tier 1: Logs, history, audit — high volume, low offline value
+                            ['activityLogs', 'auditLogs', 'systemLogs', 'auditTrail', 'complianceLogs',
+                             'accessLogs', 'dataModificationLogs', 'deletionLogs', 'exportLogs',
+                             'complianceReports', 'alertHistory', 'incidentHistory', 'suspensionHistory',
+                             'importExportHistory', 'messageLog', 'notificationHistory', 'paymentHistory',
+                             'paymentWebhooks', 'dailyDigestLogs', 'approvalAuditTrail'],
+                            // Tier 2: Predictions, analytics, templates — regenerable
+                            ['stockPredictions', 'stockAnalysisABC', 'reorderSuggestions', 'stockTrendHistory',
+                             'deliveryRoutes', 'routeStops', 'addressClusters', 'routeOptimizations',
+                             'generatedReports', 'reportSchedules', 'reportTemplates', 'financialMetrics',
+                             'messageTemplates', 'deliveryTicketTemplates', 'productImages',
+                             'dashboardLayouts', 'widgetConfigs', 'keyboardShortcuts', 'themeSettings'],
+                            // Tier 3: Large transactional data (will be re-pulled from cloud)
+                            ['stockMovements', 'transferReceipts', 'financialTransactions',
+                             'deposits', 'livreurCommissions', 'mobilePayments', 'paymentInvoices'],
+                            // Tier 4: Medium transactional data
+                            ['deliveries', 'returns', 'incidents', 'orderApprovals',
+                             'returnJustifications', 'shifts', 'timeOff', 'expiryAlerts']
+                        ];
+                        var prunedDb = JSON.parse(JSON.stringify(payload.db));
+                        var saved = false;
+                        for (var tier = 0; tier < _pruneTiers.length; tier++) {
+                            var cols = _pruneTiers[tier];
+                            for (var c = 0; c < cols.length; c++) {
+                                if (Array.isArray(prunedDb[cols[c]]) && prunedDb[cols[c]].length > 0) {
+                                    prunedDb[cols[c]] = [];
+                                }
+                            }
+                            var prunedPayload = JSON.stringify({
+                                state: payload.state,
+                                db: prunedDb,
+                                savedAt: payload.savedAt,
+                                _pruned: tier + 1
+                            });
+                            try {
+                                localStorage.setItem(self.getStorageKey(), prunedPayload);
+                                console.warn('[SAVE] ✓ Saved after pruning tier ' + (tier + 1) + ' (' + (prunedPayload.length / 1024).toFixed(0) + 'KB)');
+                                saved = true;
+                                break;
+                            } catch(e2) {
+                                // Still too large — try next tier
+                                console.warn('[SAVE] Still too large after tier ' + (tier + 1) + ', trying next...');
+                            }
+                        }
+                        if (!saved) {
+                            // Nuclear option: save only critical state (users, products, categories, stores)
+                            console.error('[SAVE] ❌ All prune tiers exhausted. Saving minimal state...');
+                            var minimalDb = {
+                                users: prunedDb.users || [],
+                                products: prunedDb.products || [],
+                                categories: prunedDb.categories || [],
+                                stores: prunedDb.stores || [],
+                                pointsOfSale: prunedDb.pointsOfSale || [],
+                                cities: prunedDb.cities || [],
+                                clients: prunedDb.clients || [],
+                                orders: prunedDb.orders || [],
+                                stockTransfers: prunedDb.stockTransfers || [],
+                                notifications: prunedDb.notifications || [],
+                                roles: prunedDb.roles || [],
+                                permissions: prunedDb.permissions || [],
+                                systemConfig: prunedDb.systemConfig || {},
+                                posDataByLocation: prunedDb.posDataByLocation || {}
+                            };
+                            try {
+                                localStorage.setItem(self.getStorageKey(), JSON.stringify({
+                                    state: payload.state,
+                                    db: minimalDb,
+                                    savedAt: payload.savedAt,
+                                    _pruned: 'minimal'
+                                }));
+                                console.warn('[SAVE] ✓ Minimal state saved');
+                            } catch(e3) {
+                                console.error('[SAVE] ❌ Cannot save even minimal state:', e3.message);
+                            }
+                        }
+                    } else {
+                        console.error('[SAVE] Unexpected localStorage error:', quotaErr);
+                    }
+                }
                 var _elapsed = performance.now() - _st0;
                 if (_elapsed > 100) console.warn('[PERF] CORE.save slow: ' + _elapsed.toFixed(0) + 'ms');
             };
@@ -5170,10 +5606,23 @@ select.form-input { cursor: pointer; }
             // and if recordStockMovement also calls save(), that's another 4-5 PUTs — all redundant.
             if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine && this.hasDirty()) {
                 clearTimeout(this._cloudPushTimer);
-                // Auto-reset stuck lock after 30s
-                if (this._isCloudPushing && this._cloudPushStart && (Date.now() - this._cloudPushStart > 30000)) {
-                    console.warn('[CLOUD-SAVE] Resetting stuck push lock');
+                // Auto-reset stuck CORE lock after 60s (aligned with API lock's 120s auto-reset)
+                if (this._isCloudPushing && this._cloudPushStart && (Date.now() - this._cloudPushStart > 60000)) {
+                    console.warn('[CLOUD-SAVE] Resetting stuck push lock after ' + Math.round((Date.now() - this._cloudPushStart)/1000) + 's');
                     this._isCloudPushing = false;
+                }
+
+                // P5: Skip if CORE push is already running (prevents duplicate pushes that collide with API mutex)
+                if (this._isCloudPushing) {
+                    console.log('[CLOUD-SAVE] Skipping — CORE push already in progress');
+                    return;
+                }
+
+                // P5: Skip if API global push mutex is already active (periodic sync / login sync running)
+                if (typeof API !== 'undefined' && API._isSyncPushing) {
+                    var _apiPushAge = API._syncPushStart ? Math.round((Date.now() - API._syncPushStart)/1000) : '?';
+                    console.log('[CLOUD-SAVE] Skipping — API sync push in progress (' + _apiPushAge + 's)');
+                    return;
                 }
 
                 // PERF: Debounce — wait 3s of inactivity before pushing to cloud.
@@ -5234,7 +5683,10 @@ select.form-input { cursor: pointer; }
 
         // CRUD
         create(collection, item, options = {}) {
-            const ids = this.db[collection].map(i => i.id || 0);
+            // BUG FIX: Only use numeric IDs for max calculation.
+            // After sync merge, cloud items with UUID string IDs appear in the collection.
+            // Math.max(1, 2, "uuid-string") returns NaN → new items get id: NaN and become invisible.
+            const ids = this.db[collection].map(i => i.id).filter(id => typeof id === 'number' && Number.isFinite(id));
             const id = (ids.length > 0 ? Math.max(...ids) : 0) + 1;
             const ts = new Date().toISOString();
             const newItem = { ...item, id, createdAt: ts, updatedAt: ts };
@@ -5701,13 +6153,21 @@ select.form-input { cursor: pointer; }
         _userIndex: null,
         _rebuildIndexes() {
             this._productIndex = new Map();
-            (this.db.products || []).forEach(p => { this._productIndex.set(p.id, p); this._productIndex.set(String(p.id), p); });
+            (this.db.products || []).forEach(p => {
+                this._productIndex.set(p.id, p);
+                this._productIndex.set(String(p.id), p);
+                // Also index by _apiId so getProduct(uuid) works for transferred products
+                if (p._apiId) this._productIndex.set(p._apiId, p);
+                if (p._apiId) this._productIndex.set(String(p._apiId), p);
+            });
             this._userIndex = new Map();
             (this.db.users || []).forEach(u => { this._userIndex.set(u.id, u); this._userIndex.set(String(u.id), u); if (u._apiId) this._userIndex.set(u._apiId, u); });
         },
         getProduct(id) {
             if (!this._productIndex) this._rebuildIndexes();
-            return this._productIndex.get(id) || this._productIndex.get(String(id)) || this.db.products.find(p => p.id === id || String(p.id) === String(id));
+            return this._productIndex.get(id)
+                || this._productIndex.get(String(id))
+                || this.db.products.find(p => p.id === id || String(p.id) === String(id) || (p._apiId && String(p._apiId) === String(id)));
         },
         getUser(id) {
             if (!this._userIndex) this._rebuildIndexes();
@@ -5764,6 +6224,7 @@ select.form-input { cursor: pointer; }
                 if (!product.posStocks) product.posStocks = {};
                 if (!product.posStocks[posId]) product.posStocks[posId] = { stock: 0, price: product.price || 0 };
                 product.posStocks[posId].stock = safeStock;
+                product.posStocks[posId].lastUpdated = new Date().toISOString();
                 // Also update master stock ONLY if product belongs to this POS
                 // (prevents transfer from one POS overwriting the master stock)
                 if (product.posId == posId || !product.posId) {
@@ -5773,6 +6234,8 @@ select.form-input { cursor: pointer; }
                 // No posId — update master stock directly
                 product.stock = safeStock;
             }
+            // FIX: Set updatedAt so _smartMerge preserves this change vs cloud
+            product.updatedAt = new Date().toISOString();
             this.markDirty('products');
             this.save();
         },
@@ -6698,8 +7161,11 @@ select.form-input { cursor: pointer; }
             this.db.stockTransfers = this.db.stockTransfers || [];
             this.db.stockTransfers.push({
                 id: transferId,
-                productId: productId,
+                productId: product._apiId || productId,
                 productName: product.name,
+                productSku: product.barcode || product.sku || null,
+                productPrice: product.price || 0,
+                productCategory: product.category || product.categoryId || null,
                 qty: qty,
                 sourcePosId: fromPosId,
                 sourcePosName: fromPos.name,
@@ -6778,6 +7244,9 @@ select.form-input { cursor: pointer; }
                 updatedAt: now,
                 requestedById: data.requestedById || this.state.currentUser?.id || null,
                 requestedByName: data.requestedByName || this.state.currentUser?.name || null,
+                createdByName: data.createdByName || this.state.currentUser?.name || null,
+                productPrice: data.productPrice || product?.price || 0,
+                productCategory: data.productCategory || product?.category || null,
                 meta: { status: 'pending', ...(data.meta || {}) }
             };
 
@@ -9373,18 +9842,22 @@ select.form-input { cursor: pointer; }
                 userId: currentUser.id,
                 userName: currentUser.name,
                 userRole: currentUser.role,
-                action, // create, update, delete, approve, reject, assign, complete, cancel
-                entity, // user, order, delivery, product, stock, finance, incident, pos, etc.
+                action,
+                entity,
                 entityId,
                 entityName,
                 details: typeof details === 'string' ? { description: details } : details,
-                before: before ? JSON.stringify(before) : null,
-                after: after ? JSON.stringify(after) : null,
-                status, // success, error, pending, cancelled, warning
-                ipAddress: 'localhost' // Sera collecté côté client si possible
+                // PERF: Don't store full before/after snapshots — they bloat localStorage
+                before: null,
+                after: null,
+                status,
+                ipAddress: 'localhost'
             };
 
+            if (!this.db.auditLogs) this.db.auditLogs = [];
             this.db.auditLogs.unshift(auditEntry);
+            // Cap inline to avoid unbounded growth between saves
+            if (this.db.auditLogs.length > 250) this.db.auditLogs.length = 250;
             this.save();
             return auditEntry;
         },
@@ -9458,11 +9931,14 @@ select.form-input { cursor: pointer; }
 
             this.db.stockMovements = this.db.stockMovements || [];
             this.db.stockMovements.unshift(movement);
+            // Cap to prevent unbounded growth (full history lives in cloud)
+            if (this.db.stockMovements.length > 500) this.db.stockMovements.length = 500;
 
             if (effectivePosId !== null && this.db.posDataByLocation && this.db.posDataByLocation[effectivePosId]) {
                 const location = this.db.posDataByLocation[effectivePosId];
                 if (!location.stockMovements) location.stockMovements = [];
                 location.stockMovements.unshift(movement);
+                if (location.stockMovements.length > 100) location.stockMovements.length = 100;
             }
 
             this.save();
@@ -9508,6 +9984,8 @@ select.form-input { cursor: pointer; }
                 createdAt: new Date().toISOString()
             };
             this.db.financialTransactions.unshift(tx);
+            // Cap to prevent unbounded growth (full history lives in cloud)
+            if (this.db.financialTransactions.length > 500) this.db.financialTransactions.length = 500;
             this.save();
             return tx;
         },
@@ -9662,6 +10140,8 @@ select.form-input { cursor: pointer; }
 
             if (!CORE.db.activityLogs) CORE.db.activityLogs = [];
             CORE.db.activityLogs.push(log);
+            // Cap inline to avoid unbounded growth between saves
+            if (CORE.db.activityLogs.length > 250) CORE.db.activityLogs = CORE.db.activityLogs.slice(-250);
 
             // Also record in auditLogs for the gestionnaire module
             if (!CORE.db.auditLogs) CORE.db.auditLogs = [];
@@ -9676,10 +10156,12 @@ select.form-input { cursor: pointer; }
                 entityId,
                 entityName: details.entityName || '',
                 details: details.description || '',
-                before: details.before || null,
-                after: details.after || null,
+                before: null,
+                after: null,
                 status: 'recorded'
             });
+            // Cap inline
+            if (CORE.db.auditLogs.length > 250) CORE.db.auditLogs = CORE.db.auditLogs.slice(-250);
 
             CORE.save();
             console.log('✓ Activité enregistrée:', log.action, log.entity);
@@ -24132,11 +24614,11 @@ select.form-input { cursor: pointer; }
 
                         <!-- Navigation -->
                         <nav class="flex-1 px-4 py-2 space-y-1 overflow-y-auto">
-                            ${this.renderNavIcon('dashboard', 'layout-dashboard', t('menu.dashboard'))}
+                            ${this.renderNavIcon('dashboard', 'layout-dashboard', t('menu.dashboard'), CORE.getUnreadNotificationCount())}
                             ${this.renderNavIcon('pos', 'shopping-cart', t('menu.pos'))}
                             ${this.renderNavIcon('clients', 'users', t('menu.clients'))}
-                            ${this.renderNavIcon('orders', 'receipt', t('menu.orders'))}
-                            ${this.renderNavIcon('stock', 'package', t('menu.stock'))}
+                            ${this.renderNavIcon('orders', 'receipt', t('menu.orders'), (CORE.db.orders || []).filter(o => o.status === 'pending' || o.status === 'new').length)}
+                            ${this.renderNavIcon('stock', 'package', t('menu.stock'), (typeof GestionnaireModule !== 'undefined' && GestionnaireModule.getPendingIncomingTransfers ? GestionnaireModule.getPendingIncomingTransfers().length : 0))}
                             ${this.renderNavIcon('livreurs', 'bike', t('menu.deliverers'))}
                             ${this.renderNavIcon('reservations', 'calendar-clock', t('menu.reservations'))}
                             ${this.renderNavIcon('commissions', 'percent', t('menu.commissions'))}
@@ -24176,11 +24658,14 @@ select.form-input { cursor: pointer; }
                 </div>`;
         },
 
-        renderNavIcon(view, icon, label = '') {
+        renderNavIcon(view, icon, label = '', badge = 0) {
             const active = this.state.currentView === view;
             const title = label || view.charAt(0).toUpperCase() + view.slice(1);
             return `<button onclick="VendeurModule.navigateTo('${view}')" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group ${active ? 'bg-gradient-to-r from-emerald-500/20 to-emerald-600/10 text-emerald-400 shadow-lg shadow-emerald-500/10 border-l-2 border-emerald-400' : 'text-slate-400 hover:bg-white/5 hover:text-white'}">
-                <i data-lucide="${icon}" class="w-5 h-5 flex-shrink-0 ${active ? 'drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]' : ''}"></i>
+                <div class="relative flex-shrink-0">
+                    <i data-lucide="${icon}" class="w-5 h-5 ${active ? 'drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]' : ''}"></i>
+                    ${badge > 0 ? `<span class="absolute -top-2 -right-2 min-w-[18px] h-[18px] bg-red-500 text-white text-[10px] font-black rounded-full flex items-center justify-center animate-pulse shadow-lg shadow-red-500/40">${badge > 9 ? '9+' : badge}</span>` : ''}
+                </div>
                 <span class="text-sm font-bold truncate">${title}</span>
                 ${active ? '<div class="ml-auto w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>' : ''}
             </button>`;
@@ -26385,6 +26870,53 @@ Rapport généré par le système d'IA de gestion du stock
 
             const posId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
 
+            // SELF-HEALING: Fix posStocks key mismatch from earlier broken transfers
+            // When confirmTransferReception used transfer.destPosId instead of user.pos,
+            // posStocks was written to a wrong key. Detect and copy to user's actual POS key.
+            if (posId && !this._posStocksHealed) {
+                this._posStocksHealed = true;
+                const strPosId = String(posId);
+                let healed = 0;
+                (CORE.db.products || []).forEach(p => {
+                    if (!p.posStocks) return;
+                    // Skip if product already has entry for user's POS
+                    if (p.posStocks[strPosId] || p.posStocks[posId]) return;
+                    // Look for any posStocks entry that has lastTransfer (= was set by transfer reception)
+                    const keys = Object.keys(p.posStocks);
+                    let bestEntry = null;
+                    let bestKey = null;
+                    for (const k of keys) {
+                        const entry = p.posStocks[k];
+                        if (entry && entry.lastTransfer) {
+                            if (!bestEntry || (entry.lastTransfer > bestEntry.lastTransfer)) {
+                                bestEntry = entry;
+                                bestKey = k;
+                            }
+                        }
+                    }
+                    if (bestEntry && bestKey) {
+                        // This product had a transfer received but posStocks key doesn't match user's POS
+                        // Check if the product was meant for this POS (destPosName matches)
+                        console.warn('[SELF-HEAL] Product "' + p.name + '" (id=' + p.id + ') has posStocks[' + bestKey + '] with lastTransfer but no entry for user POS "' + strPosId + '". Copying.');
+                        p.posStocks[strPosId] = JSON.parse(JSON.stringify(bestEntry));
+                        p.posStocks[strPosId]._healedFrom = bestKey;
+                        p.posStocks[strPosId]._healedAt = new Date().toISOString();
+                        // Also clear lockedToPosId if it blocks visibility
+                        if (p.lockedToPosId && String(p.lockedToPosId) !== strPosId) {
+                            p.lockedToPosId = null;
+                        }
+                        p.updatedAt = new Date().toISOString();
+                        healed++;
+                    }
+                });
+                if (healed > 0) {
+                    console.log('[SELF-HEAL] Fixed posStocks for ' + healed + ' product(s). Saving...');
+                    CORE._productIndex = null;
+                    CORE.markDirty('products');
+                    CORE.save(true);
+                }
+            }
+
             // Utiliser la même logique que ManagerModule.productBelongsToPos()
             // pour que le gestionnaire et le manager voient les mêmes produits
             const products = (CORE.getVisibleProducts() || []).filter(p => {
@@ -26674,9 +27206,11 @@ Rapport généré par le système d'IA de gestion du stock
             );
             incomingTransferNotifs.forEach(n => {
                 if (!this.state.criticalAlerts['transfer_' + n.id]) {
-                    const transfer = (CORE.db.stockTransfers || []).find(t => t.id === n.transferId);
-                    const itemCount = transfer ? (transfer.items || []).length : 0;
-                    const fromPosName = transfer ? (CORE.getPOS(transfer.sourcePosId)?.name || 'POS source') : 'un POS';
+                    const transfer = (CORE.db.stockTransfers || []).find(t => t.id === n.transferId)
+                        || (CORE.db.transferReceipts || []).find(t => t.id === n.transferId);
+                    // FIX: transfers have qty/quantity, not items[]
+                    const itemCount = transfer ? (transfer.qty || transfer.quantity || 1) : 0;
+                    const fromPosName = transfer ? (CORE.getPOS(transfer.sourcePosId || transfer.fromPosId)?.name || transfer.sourcePosName || transfer.fromPosName || 'Dépôt principal') : 'un POS';
                     this.addNotification('transfer_incoming', '📦 Transfert entrant',
                         `${itemCount} produit(s) reçu(s) de ${fromPosName} — Veuillez valider ou rejeter`,
                         'amber');
@@ -30112,8 +30646,11 @@ Rapport généré par le système d'IA de gestion du stock
 
             const transfer = {
                 id: transferId,
-                productId: productId,
+                productId: product._apiId || productId,
                 productName: product.name,
+                productSku: product.barcode || product.sku || null,
+                productPrice: product.price || 0,
+                productCategory: product.category || product.categoryId || null,
                 qty: qty,
                 sourcePosId: sourcePosId,
                 sourcePosName: sourcePos.name,
@@ -30215,55 +30752,70 @@ Rapport généré par le système d'IA de gestion du stock
 
         getPendingIncomingTransfers() {
             const currentPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
-            return (CORE.db.stockTransfers || []).filter(t =>
+            // FIX: Check BOTH stockTransfers (inter-POS) AND transferReceipts (depot→POS)
+            const fromStockTransfers = (CORE.db.stockTransfers || []).filter(t =>
                 String(t.destPosId) === String(currentPosId) && t.status === 'pending'
-            );
+            ).map(t => ({ ...t, _source: 'stockTransfers' }));
+            const fromReceipts = (CORE.db.transferReceipts || []).filter(t =>
+                String(t.toPosId) === String(currentPosId) && t.status === 'pending'
+            ).map(t => ({
+                ...t,
+                _source: 'transferReceipts',
+                // Normalize field names for unified display
+                destPosId: t.toPosId,
+                destPosName: t.toPosName,
+                sourcePosId: t.fromPosId,
+                sourcePosName: t.fromPosName || 'Dépôt principal',
+                qty: t.quantity || t.qty,
+                createdByName: t.createdByName || t.requestedByName || 'Manager'
+            }));
+            return [...fromStockTransfers, ...fromReceipts].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         },
 
         getPendingOutgoingTransfers() {
             const currentPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
-            return (CORE.db.stockTransfers || []).filter(t =>
+            const fromStockTransfers = (CORE.db.stockTransfers || []).filter(t =>
                 String(t.sourcePosId) === String(currentPosId) && t.status === 'pending'
             );
+            const fromReceipts = (CORE.db.transferReceipts || []).filter(t =>
+                String(t.fromPosId) === String(currentPosId) && t.status === 'pending'
+            ).map(t => ({
+                ...t,
+                _source: 'transferReceipts',
+                destPosId: t.toPosId,
+                destPosName: t.toPosName,
+                sourcePosId: t.fromPosId,
+                sourcePosName: t.fromPosName || 'Dépôt principal',
+                qty: t.quantity || t.qty
+            }));
+            return [...fromStockTransfers, ...fromReceipts].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         },
 
         getTransferHistory() {
             const currentPosId = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
-            return (CORE.db.stockTransfers || []).filter(t =>
+            const fromStockTransfers = (CORE.db.stockTransfers || []).filter(t =>
                 (String(t.destPosId) === String(currentPosId) || String(t.sourcePosId) === String(currentPosId)) && t.status !== 'pending'
-            ).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+            );
+            const fromReceipts = (CORE.db.transferReceipts || []).filter(t =>
+                (String(t.toPosId) === String(currentPosId) || String(t.fromPosId) === String(currentPosId)) && t.status !== 'pending'
+            ).map(t => ({
+                ...t,
+                _source: 'transferReceipts',
+                destPosId: t.toPosId,
+                destPosName: t.toPosName,
+                sourcePosId: t.fromPosId,
+                sourcePosName: t.fromPosName || 'Dépôt principal',
+                qty: t.quantity || t.qty,
+                createdByName: t.createdByName || t.requestedByName || 'Manager'
+            }));
+            return [...fromStockTransfers, ...fromReceipts].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         },
 
         async showPendingTransfersModal() {
-            // CRITICAL FIX: Pull stockTransfers + products from cloud BEFORE displaying
-            // Without this, the gestionnaire only sees data from the last full sync
-            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
-                try {
-                    UI.toast('Chargement des transferts...', 'info', 2000);
-                    // Pull all critical data in parallel for speed
-                    const [fresh, freshNotif, freshProducts] = await Promise.all([
-                        API.request('/sync/stockTransfers?light=1', { method: 'GET', timeout: 8000 }).catch(e => null),
-                        API.request('/sync/notifications?light=1', { method: 'GET', timeout: 8000 }).catch(e => null),
-                        API.request('/sync/products?light=1', { method: 'GET', timeout: 8000 }).catch(e => null)
-                    ]);
-                    if (fresh && Array.isArray(fresh.data)) {
-                        CORE.db.stockTransfers = API._smartMerge(CORE.db.stockTransfers || [], fresh.data);
-                        console.log('[TRANSFERS] Pulled ' + fresh.data.length + ' stockTransfers from cloud');
-                    }
-                    if (freshNotif && Array.isArray(freshNotif.data)) {
-                        CORE.db.notifications = API._smartMerge(CORE.db.notifications || [], freshNotif.data);
-                    }
-                    if (freshProducts && Array.isArray(freshProducts.data)) {
-                        CORE.db.products = API._smartMerge(CORE.db.products || [], freshProducts.data);
-                        console.log('[TRANSFERS] Pulled ' + freshProducts.data.length + ' products from cloud');
-                    }
-                    CORE.save();
-                } catch(e) {
-                    console.warn('[TRANSFERS] Cloud pull failed, using cached data:', e.message);
-                }
-            }
+            // ...existing code...
             const incoming = this.getPendingIncomingTransfers();
             const outgoing = this.getPendingOutgoingTransfers();
+            const history = this.getTransferHistory();
             const currentPosName = CORE.getPOS(CORE.state.currentUser?.pos)?.name || 'Mon POS';
 
             const html = `
@@ -30382,10 +30934,43 @@ Rapport généré par le système d'IA de gestion du stock
                         `}
                     </div>
 
-                    <!-- Bouton historique -->
-                    <button onclick="UI.closeModal();GestionnaireModule.showTransferHistoryModal()" class="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition flex items-center justify-center gap-2">
-                        <i data-lucide="history" class="w-4 h-4"></i> Voir l'historique des transferts
-                    </button>
+                    <!-- Historique des transferts reçus -->
+                    <div class="bg-white rounded-2xl border border-slate-200 p-5">
+                        <div class="flex items-center gap-2 mb-4">
+                            <i data-lucide="history" class="w-5 h-5 text-slate-600"></i>
+                            <span class="font-black text-slate-900">Historique des transferts reçus</span>
+                            <span class="px-2 py-1 bg-slate-100 text-slate-700 rounded-full text-xs font-black">${history.length}</span>
+                        </div>
+                        ${history.length === 0 ? `
+                            <div class="text-center py-6 text-slate-400">
+                                <i data-lucide="inbox" class="w-12 h-12 mx-auto mb-2 opacity-50"></i>
+                                <div>Aucun transfert reçu</div>
+                            </div>
+                        ` : `
+                            <div class="space-y-3">
+                                ${history.map(t => `
+                                    <div class="p-4 rounded-xl border border-slate-200 bg-slate-50">
+                                        <div class="flex items-start justify-between gap-4">
+                                            <div class="flex-1">
+                                                <div class="flex items-center gap-2 mb-1">
+                                                    <span class="font-black text-slate-900">${t.productName}</span>
+                                                    <span class="px-2 py-0.5 bg-slate-400 text-white text-xs font-black rounded-full">${t.status === 'accepted' ? 'REÇU' : t.status}</span>
+                                                </div>
+                                                <div class="text-2xl font-black text-slate-600 mb-2">${t.qty} unités</div>
+                                                <div class="text-sm text-slate-600">
+                                                    <div>📍 De: <strong>${t.sourcePosName}</strong></div>
+                                                    <div>👤 Par: ${t.createdByName}</div>
+                                                    <div>📅 Envoyé le: ${new Date(t.createdAt).toLocaleString('fr-FR')}</div>
+                                                    ${t.receivedAt ? `<div>📦 Reçu le: ${new Date(t.receivedAt).toLocaleString('fr-FR')}</div>` : ''}
+                                                    ${t.reason ? `<div class="mt-1">📝 Motif: ${t.reason}</div>` : ''}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        `}
+                    </div>
                 </div>
             `;
 
@@ -30404,7 +30989,17 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         showReceiveTransferModal(transferId) {
-            const transfer = (CORE.db.stockTransfers || []).find(t => t.id === transferId);
+            // FIX: Search BOTH stockTransfers and transferReceipts (depot→POS)
+            let transfer = (CORE.db.stockTransfers || []).find(t => t.id === transferId);
+            let _transferSource = 'stockTransfers';
+            if (!transfer) {
+                transfer = (CORE.db.transferReceipts || []).find(t => t.id === transferId);
+                _transferSource = 'transferReceipts';
+                if (transfer) {
+                    // Normalize fields for display
+                    transfer = { ...transfer, sourcePosId: transfer.fromPosId, sourcePosName: transfer.fromPosName || 'Dépôt principal', destPosId: transfer.toPosId, destPosName: transfer.toPosName, qty: transfer.quantity || transfer.qty, _source: _transferSource };
+                }
+            }
             if (!transfer) return UI.toast('Transfert introuvable', 'error');
 
             // Stocker temporairement les médias
@@ -30521,8 +31116,21 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         confirmTransferReception(transferId) {
-            // Utiliser comparaison non-stricte pour trouver le transfert
-            const transfer = (CORE.db.stockTransfers || []).find(t => t.id == transferId);
+            // FIX: Search BOTH stockTransfers and transferReceipts
+            let transfer = (CORE.db.stockTransfers || []).find(t => t.id == transferId);
+            let _transferSource = 'stockTransfers';
+            if (!transfer) {
+                transfer = (CORE.db.transferReceipts || []).find(t => t.id == transferId);
+                _transferSource = 'transferReceipts';
+                if (transfer) {
+                    transfer.sourcePosId = transfer.fromPosId;
+                    transfer.sourcePosName = transfer.fromPosName || 'Dépôt principal';
+                    transfer.destPosId = transfer.toPosId;
+                    transfer.destPosName = transfer.toPosName;
+                    transfer.qty = transfer.quantity || transfer.qty;
+                    transfer._source = _transferSource;
+                }
+            }
             if (!transfer) {
                 console.error('Transfert introuvable:', transferId);
                 return UI.toast('Transfert introuvable', 'error');
@@ -30536,6 +31144,10 @@ Rapport généré par le système d'IA de gestion du stock
                         const freshProducts = await API.request('/sync/products?light=1', { method: 'GET', timeout: 8000 });
                         if (freshProducts && Array.isArray(freshProducts.data)) {
                             CORE.db.products = API._smartMerge(CORE.db.products || [], freshProducts.data);
+                            // FIX: Invalidate product index after replacing the array
+                            // Without this, getProduct() returns stale references from the OLD array,
+                            // and setProductStock() modifies a ghost object instead of the real product
+                            CORE._productIndex = null;
                             console.log('[TRANSFER-RECEPTION] Pulled ' + freshProducts.data.length + ' products from cloud before confirmation');
                         }
                     }
@@ -30556,30 +31168,67 @@ Rapport généré par le système d'IA de gestion du stock
             const destPosId = transfer.destPosId;
             const sourcePosId = transfer.sourcePosId;
             const qty = Number(transfer.qty) || 0;
+            
+            // DIAGNOSTIC: Log the user's POS vs the transfer's destPosId
+            const _userPos = CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId;
+            console.log('[TRANSFER-RECEPTION] POS diagnostic:', {
+                userPos: _userPos, userPosType: typeof _userPos,
+                destPosId: destPosId, destPosIdType: typeof destPosId,
+                match: String(_userPos) === String(destPosId),
+                sourcePosId: sourcePosId, transferId: transferId
+            });
+            
+            // BUG FIX (v36): If the transfer's destPosId doesn't match the current user's POS,
+            // the product will be invisible to this user. Use the user's POS as the REAL destination.
+            const effectiveDestPosId = _userPos || destPosId;
 
-            // BUG FIX: Chercher dans TOUS les produits (pas getVisibleProducts qui filtre par POS)
-            // Le produit transféré appartient au POS source, donc getVisibleProducts le filtrait
-            let product = (CORE.db.products || []).find(p => p.id == productId);
+            // BUG FIX: Chercher dans TOUS les produits avec recherche multi-critères
+            // Le productId peut être un entier (local) ou un UUID (cloud) — il faut chercher les deux
+            const allProducts = CORE.db.products || [];
+            const pidStr = String(productId);
+            let product = allProducts.find(p => p.id == productId)
+                || allProducts.find(p => String(p.id) === pidStr)
+                || allProducts.find(p => p._origLocalId != null && String(p._origLocalId) === pidStr)
+                || allProducts.find(p => p._apiId != null && String(p._apiId) === pidStr)
+                || allProducts.find(p => p.barcode && transfer.productSku && p.barcode === transfer.productSku)
+                || allProducts.find(p => transfer.productName && p.name === transfer.productName);
 
-            // Si le produit n'existe pas, le créer à partir des infos du transfert
+            console.log('[TRANSFER-RECEPTION] Recherche produit:', { productId, pidStr, found: !!product, productFoundId: product?.id, productFoundName: product?.name });
+
+            // Si le produit n'existe pas du tout, le créer à partir des infos du transfert
             if (!product) {
-
-                // Créer le produit avec les informations disponibles
-                const newProductId = CORE.uid();
-                product = {
-                    id: newProductId,
+                // BUG FIX: Use CORE.create() to get a proper sequential integer ID
+                // instead of CORE.uid() which produces a string-based ID that breaks lookups.
+                // Also initialize posStocks for the destination POS.
+                const destPosStocks = {};
+                destPosStocks[destPosId] = { stock: 0, price: transfer.productPrice || 0, lastUpdated: new Date().toISOString() };
+                // Initialize posStocks for all known POS with stock=0
+                (CORE.db.pointsOfSale || []).forEach(loc => {
+                    if (!destPosStocks[loc.id]) destPosStocks[loc.id] = { stock: 0, price: transfer.productPrice || 0 };
+                });
+                product = CORE.create('products', {
                     name: transfer.productName || 'Produit transféré',
-                    price: 0,
-                    category: null,
-                    description: 'Produit créé automatiquement lors du transfert depuis ' + transfer.sourcePosName,
-                    posStocks: {},
-                    createdAt: new Date().toISOString(),
+                    price: transfer.productPrice || 0,
+                    costPrice: transfer.productPrice || 0,
+                    categoryId: transfer.productCategory || null,
+                    category: transfer.productCategory || null,
+                    barcode: transfer.productSku || null,
+                    sku: transfer.productSku || null,
+                    description: 'Produit créé automatiquement lors du transfert depuis ' + (transfer.sourcePosName || 'Dépôt principal'),
+                    stock: 0,
+                    minStock: 5,
+                    posStocks: destPosStocks,
+                    posId: destPosId,
+                    storeId: destPosId,
+                    active: true,
                     createdViaTransfer: true,
-                    originalTransferId: transferId
-                };
-
-                CORE.db.products.push(product);
-
+                    originalTransferId: transferId,
+                    originalProductId: productId,
+                    _apiId: (typeof productId === 'string' && /^[0-9a-f]{8}-/i.test(productId)) ? productId : null
+                });
+                // Rebuild index so the new product is immediately findable
+                CORE._productIndex = null;
+                console.log('[TRANSFER-RECEPTION] Nouveau produit créé (id=' + product.id + '):', product.name);
                 UI.toast('ℹ️ Nouveau produit créé: ' + product.name, 'info');
             }
 
@@ -30591,12 +31240,57 @@ Rapport généré par le système d'IA de gestion du stock
             transfer.receptionNote = note;
             transfer.receptionMedia = media;
 
-            // Ajouter le stock au POS destinataire via CORE.setProductStock
-            // BUG FIX: Utiliser setProductStock au lieu de manipuler posStocks directement
-            // Cela met à jour à la fois product.stock ET product.posStocks[posId]
-            const currentDestStock = CORE.getProductStock(product.id, destPosId) || 0;
+            // BUG FIX (v34): Clear lockedToPosId so the product is visible at the destination POS.
+            if (product.lockedToPosId && String(product.lockedToPosId) !== String(effectiveDestPosId)) {
+                console.log('[TRANSFER-RECEPTION] Clearing lockedToPosId=' + product.lockedToPosId + ' for product ' + product.id + ' received at POS ' + effectiveDestPosId);
+                product.lockedToPosId = null;
+            }
+
+            // Ajouter le stock au POS destinataire (use effectiveDestPosId = user's POS)
+            if (!product.posStocks) product.posStocks = {};
+            if (!product.posStocks[effectiveDestPosId]) product.posStocks[effectiveDestPosId] = { stock: 0, price: product.price || 0 };
+            const currentDestStock = Number(product.posStocks[effectiveDestPosId].stock) || 0;
             const newDestStock = currentDestStock + qty;
-            CORE.setProductStock(product.id, destPosId, newDestStock);
+            product.posStocks[effectiveDestPosId].stock = newDestStock;
+            product.posStocks[effectiveDestPosId].lastUpdated = new Date().toISOString();
+            product.posStocks[effectiveDestPosId].lastTransfer = new Date().toISOString();
+
+            // ALSO set posStocks for the original destPosId if different from user POS
+            if (String(destPosId) !== String(effectiveDestPosId)) {
+                if (!product.posStocks[destPosId]) product.posStocks[destPosId] = { stock: 0, price: product.price || 0 };
+                product.posStocks[destPosId].stock = (Number(product.posStocks[destPosId].stock) || 0) + qty;
+                product.posStocks[destPosId].lastUpdated = new Date().toISOString();
+                product.posStocks[destPosId].lastTransfer = new Date().toISOString();
+                console.log('[TRANSFER-RECEPTION] Also set posStocks for original destPosId=' + destPosId + ' (differs from user POS=' + effectiveDestPosId + ')');
+            }
+
+            // BUG FIX: Décrémenter pendingIncoming
+            if (product.posStocks[effectiveDestPosId].pendingIncoming) {
+                product.posStocks[effectiveDestPosId].pendingIncoming = Math.max(0,
+                    Number(product.posStocks[effectiveDestPosId].pendingIncoming) - qty
+                );
+            }
+
+            // Also update master stock if product belongs to this POS
+            if (product.posId && (String(product.posId) === String(effectiveDestPosId) || String(product.posId) === String(destPosId))) {
+                product.stock = newDestStock;
+            }
+            product.updatedAt = new Date().toISOString();
+            CORE._productIndex = null;
+            CORE.markDirty('products');
+
+            // LOG DEBUG : Vérifier le stock après ajout
+            console.log('[DEBUG TRANSFERT] Après mise à jour stock direct:', {
+                produitId: product.id,
+                produitNom: product.name,
+                effectiveDestPosId: effectiveDestPosId,
+                originalDestPosId: destPosId,
+                userPos: _userPos,
+                stockAvant: currentDestStock,
+                stockApres: newDestStock,
+                qtyAjoutée: qty,
+                posStocks: JSON.parse(JSON.stringify(product.posStocks))
+            });
 
             // Enregistrer le mouvement d'entrée
             CORE.db.stockMovements = CORE.db.stockMovements || [];
@@ -30604,14 +31298,27 @@ Rapport généré par le système d'IA de gestion du stock
                 id: 'MOV-' + CORE.uid(),
                 productId: product.id,
                 productName: product.name,
-                type: 'in',
+                type: 'transfer_in',
+                quantity: qty,
                 qty: qty,
                 ref: transferId,
                 note: 'Réception transfert depuis ' + transfer.sourcePosName + (note ? ' - ' + note : ''),
-                posId: destPosId,
+                posId: effectiveDestPosId,
                 createdBy: CORE.state.currentUser?.id,
                 createdByName: CORE.state.currentUser?.name,
-                createdAt: new Date().toISOString()
+                createdAt: new Date().toISOString(),
+                status: 'completed'
+            });
+
+            // BUG FIX: Marquer les mouvements orphelins (créés à l'envoi) comme 'completed'
+            // executeMainTransfer crée des mouvements avec status:'pending' et ref = receipt.id
+            // qui ne sont jamais mis à jour — les marquer maintenant
+            (CORE.db.stockMovements || []).forEach(m => {
+                if (m.status === 'pending' && (m.ref === transferId ||
+                    (transfer._source === 'transferReceipts' && m.meta?.receiptId === transferId))) {
+                    m.status = 'completed';
+                    m.completedAt = new Date().toISOString();
+                }
             });
 
             // Notification au POS source avec preuves
@@ -30649,7 +31356,7 @@ Rapport généré par le système d'IA de gestion du stock
                 userId: CORE.state.currentUser?.id,
                 userName: CORE.state.currentUser?.name || 'Système',
                 userRole: CORE.state.currentUser?.role || 'gestionnaire',
-                posId: destPosId,
+                posId: effectiveDestPosId,
                 action: 'transfer_in',
                 entity: 'stock',
                 entityId: transferId,
@@ -30659,10 +31366,60 @@ Rapport généré par le système d'IA de gestion du stock
             });
 
             CORE.markDirty('stockTransfers');
+            CORE.markDirty('transferReceipts');
             CORE.markDirty('products');
             CORE.markDirty('stockMovements');
             CORE.markDirty('notifications');
             CORE.save(true);
+
+            // BUG FIX (v36): Verify the product is actually visible after save.
+            // If getProductsOptimized or productBelongsToPos fails silently, 
+            // we detect it here and log the exact reason.
+            var _verifyProductId = product.id;
+            var _verifyDestPos = effectiveDestPosId;
+            var _verifyProduct = (CORE.db.products || []).find(function(p) { return p.id === _verifyProductId; });
+            if (!_verifyProduct) {
+                console.error('[TRANSFER-RECEPTION] ❌ CRITICAL: Product id=' + _verifyProductId + ' NOT FOUND in CORE.db.products after save! Array length=' + (CORE.db.products || []).length);
+            } else {
+                var _vps = _verifyProduct.posStocks || {};
+                var _hasDestStock = _vps[_verifyDestPos] || _vps[String(_verifyDestPos)];
+                console.log('[TRANSFER-RECEPTION] ✅ Verification:', {
+                    productId: _verifyProduct.id,
+                    productName: _verifyProduct.name,
+                    posId: _verifyProduct.posId,
+                    lockedToPosId: _verifyProduct.lockedToPosId || null,
+                    destPosId: _verifyDestPos,
+                    hasDestStock: !!_hasDestStock,
+                    destStock: _hasDestStock ? _hasDestStock.stock : 'N/A',
+                    posStocksKeys: Object.keys(_vps),
+                    userPos: CORE.state.currentUser?.pos,
+                    userPosType: typeof CORE.state.currentUser?.pos,
+                    destPosIdType: typeof _verifyDestPos
+                });
+                // Extra: check visibility through the full filter chain
+                var _canSee = CORE.canAccess('product', _verifyProduct);
+                var _belongsToPos = (typeof ManagerModule !== 'undefined' && ManagerModule.productBelongsToPos) 
+                    ? ManagerModule.productBelongsToPos(_verifyProduct, CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId) 
+                    : 'ManagerModule unavailable';
+                console.log('[TRANSFER-RECEPTION] Visibility check:', { canAccess: _canSee, productBelongsToPos: _belongsToPos });
+                if (!_canSee || _belongsToPos === false) {
+                    console.error('[TRANSFER-RECEPTION] ❌ Product is NOT VISIBLE! canAccess=' + _canSee + ', belongsToPos=' + _belongsToPos);
+                    // Emergency fix: force posStocks with string key to match user.pos
+                    var _userPosStr = String(CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId || '');
+                    if (_userPosStr && !_vps[_userPosStr]) {
+                        console.warn('[TRANSFER-RECEPTION] Applying emergency posStocks fix with string key "' + _userPosStr + '"');
+                        _verifyProduct.posStocks[_userPosStr] = { 
+                            stock: newDestStock, 
+                            price: _verifyProduct.price || 0, 
+                            lastUpdated: new Date().toISOString(),
+                            lastTransfer: new Date().toISOString()
+                        };
+                        _verifyProduct.updatedAt = new Date().toISOString();
+                        CORE._productIndex = null;
+                        CORE.save(true);
+                    }
+                }
+            }
 
             // SYNC FIX: Force immediate cloud push (500ms) so the source POS sees the confirmation quickly
             clearTimeout(CORE._cloudPushTimer);
@@ -30682,7 +31439,14 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         showRejectTransferModal(transferId) {
-            const transfer = (CORE.db.stockTransfers || []).find(t => t.id == transferId);
+            // FIX: Search BOTH stockTransfers and transferReceipts
+            let transfer = (CORE.db.stockTransfers || []).find(t => t.id == transferId);
+            if (!transfer) {
+                transfer = (CORE.db.transferReceipts || []).find(t => t.id == transferId);
+                if (transfer) {
+                    transfer = { ...transfer, sourcePosId: transfer.fromPosId, sourcePosName: transfer.fromPosName || 'Dépôt principal', destPosId: transfer.toPosId, destPosName: transfer.toPosName, qty: transfer.quantity || transfer.qty, _source: 'transferReceipts' };
+                }
+            }
             if (!transfer) return UI.toast('Transfert introuvable', 'error');
 
             const html = `
@@ -30752,8 +31516,21 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         confirmTransferRejection(transferId) {
-            // Utiliser comparaison non-stricte pour trouver le transfert
-            const transfer = (CORE.db.stockTransfers || []).find(t => t.id == transferId);
+            // FIX: Search BOTH stockTransfers and transferReceipts
+            let transfer = (CORE.db.stockTransfers || []).find(t => t.id == transferId);
+            let _transferSource = 'stockTransfers';
+            if (!transfer) {
+                transfer = (CORE.db.transferReceipts || []).find(t => t.id == transferId);
+                _transferSource = 'transferReceipts';
+                if (transfer) {
+                    transfer.sourcePosId = transfer.fromPosId;
+                    transfer.sourcePosName = transfer.fromPosName || 'Dépôt principal';
+                    transfer.destPosId = transfer.toPosId;
+                    transfer.destPosName = transfer.toPosName;
+                    transfer.qty = transfer.quantity || transfer.qty;
+                    transfer._source = _transferSource;
+                }
+            }
             if (!transfer) {
                 console.error('Transfert introuvable:', transferId);
                 return UI.toast('Transfert introuvable', 'error');
@@ -30787,12 +31564,27 @@ Rapport généré par le système d'IA de gestion du stock
             transfer.rejectionMedia = media;
 
             // Retourner le stock au POS source (mise à jour directe posStocks)
-            const sourceStock = CORE.getProductStock ? (CORE.getProductStock(productId, sourcePosId) || 0) : 0;
-            const newSourceStock = sourceStock + qty;
+            // Pour les transferts depuis le dépôt principal, restaurer product.stock
+            if (sourcePosId === 'main_depot' || transfer.fromWarehouse || transfer._source === 'transferReceipts') {
+                product.stock = (product.stock || 0) + qty;
+            } else {
+                const sourceStock = CORE.getProductStock ? (CORE.getProductStock(productId, sourcePosId) || 0) : 0;
+                const newSourceStock = sourceStock + qty;
 
-            if (!product.posStocks) product.posStocks = {};
-            if (!product.posStocks[sourcePosId]) product.posStocks[sourcePosId] = { stock: 0, price: product.price || 0 };
-            product.posStocks[sourcePosId].stock = Math.max(0, newSourceStock);
+                if (!product.posStocks) product.posStocks = {};
+                if (!product.posStocks[sourcePosId]) product.posStocks[sourcePosId] = { stock: 0, price: product.price || 0 };
+                product.posStocks[sourcePosId].stock = Math.max(0, newSourceStock);
+            }
+
+            // BUG FIX: Décrémenter pendingIncoming au POS destinataire (incrémenté dans createTransferReceipt)
+            const destPosIdForPending = transfer.destPosId || transfer.toPosId;
+            if (destPosIdForPending && product.posStocks && product.posStocks[destPosIdForPending]?.pendingIncoming) {
+                product.posStocks[destPosIdForPending].pendingIncoming = Math.max(0,
+                    Number(product.posStocks[destPosIdForPending].pendingIncoming) - qty
+                );
+            }
+            product.updatedAt = new Date().toISOString();
+            CORE._productIndex = null;
 
             // Enregistrer le mouvement de retour
             CORE.db.stockMovements = CORE.db.stockMovements || [];
@@ -30856,6 +31648,7 @@ Rapport généré par le système d'IA de gestion du stock
             });
 
             CORE.markDirty('stockTransfers');
+            CORE.markDirty('transferReceipts');
             CORE.markDirty('products');
             CORE.markDirty('stockMovements');
             CORE.markDirty('notifications');
@@ -34790,9 +35583,9 @@ Rapport généré par le système d'IA de gestion du stock
 
                         <!-- Navigation -->
                         <nav class="flex-1 px-4 py-2 space-y-1 overflow-y-auto">
-                            ${this.renderNavItem('dashboard','layout-dashboard','Tableau de bord')}
-                            ${this.renderNavItem('stocks','box','Gestion stocks')}
-                            ${this.renderNavItem('deliveries','truck','Suivi livraisons')}
+                            ${this.renderNavItem('dashboard','layout-dashboard','Tableau de bord', CORE.getUnreadNotificationCount())}
+                            ${this.renderNavItem('stocks','box','Gestion stocks', (typeof GestionnaireModule !== 'undefined' && GestionnaireModule.getPendingIncomingTransfers ? GestionnaireModule.getPendingIncomingTransfers().length : 0))}
+                            ${this.renderNavItem('deliveries','truck','Suivi livraisons', (CORE.getVisibleDeliveries ? CORE.getVisibleDeliveries().filter(d => d.status === 'pending' || d.status === 'assigned').length : 0))}
                             ${this.renderNavItem('deliverymen','user-check','Livreurs Indép.', CORE.getPendingDeliveryMen(CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId).length)}
                             ${this.renderNavItem('team','users','Équipe')}
                             ${this.renderNavItem('planning','calendar','Planification')}
@@ -40441,7 +41234,20 @@ Rapport généré par le système d'IA de gestion du stock
             if (!product) return false;
             const strPosId = String(posId);
 
+            // BUG FIX (v34): Check posStocks FIRST — if this POS has a valid posStocks entry
+            // (from a transfer reception), the product MUST be visible regardless of lockedToPosId.
+            // Previously, lockedToPosId blocked transferred products from appearing at dest POS.
+            const _stockMap = product.posStocks || {};
+            const _transferEntry = _stockMap[strPosId] ?? _stockMap[posId] ?? null;
+            if (_transferEntry) {
+                const _tStock = Number(_transferEntry.stock ?? _transferEntry.quantity ?? 0);
+                if (Number.isFinite(_tStock) && _tStock > 0) return true;
+                if (_transferEntry.assigned === true) return true;
+                if (_transferEntry.lastMovement || _transferEntry.lastUpdated || _transferEntry.lastTransfer || _transferEntry.lastRestock) return true;
+            }
+
             // Si produit est verrouillé à un POS spécifique (créé par gestionnaire assigné)
+            // Only block if no valid posStocks entry for this POS (checked above)
             if (product.lockedToPosId && String(product.lockedToPosId) !== strPosId) {
                 return false;
             }
@@ -40450,31 +41256,18 @@ Rapport généré par le système d'IA de gestion du stock
             // sauf s'il a été explicitement transféré vers un autre POS via posStocks
             if (product.posId !== null && product.posId !== undefined) {
                 if (String(product.posId) === strPosId) return true;
-
-                // Vérifier si le produit a été transféré vers ce POS (a du stock dans posStocks)
-                const stockMap = product.posStocks || {};
-                const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
-                if (!entry) return false;
-                const stock = Number(entry.stock ?? entry.quantity ?? 0);
-                if (Number.isFinite(stock) && stock > 0) return true;
-                if (entry.assigned === true) return true;
-                if (entry.lastMovement || entry.lastUpdated || entry.lastTransfer || entry.lastRestock) return true;
+                // posStocks already checked above — if we reach here, no valid entry exists
                 return false;
             }
 
             // Pour les produits sans posId (produits globaux/main warehouse)
             if (product.isMainWarehouse) return false; // Les produits du dépôt principal ne sont pas dans les POS
 
-            // Vérifier posStocks pour les produits globaux
-            const stockMap = product.posStocks || {};
-            const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
-            if (!entry) return false;
-            const stock = Number(entry.stock ?? entry.quantity ?? 0);
-            if (Number.isFinite(stock) && stock > 0) return true;
-            if (entry.assigned === true) return true;
-            if (entry.lastMovement || entry.lastUpdated || entry.lastTransfer || entry.lastRestock) return true;
-            if (Array.isArray(entry.variants) && entry.variants.length > 0) return true;
-            if (entry.price !== undefined && entry.price !== null && entry.price !== product.price) return true;
+            // Vérifier posStocks pour les produits globaux (already partially checked above)
+            if (_transferEntry) {
+                if (Array.isArray(_transferEntry.variants) && _transferEntry.variants.length > 0) return true;
+                if (_transferEntry.price !== undefined && _transferEntry.price !== null && _transferEntry.price !== product.price) return true;
+            }
             return false;
         },
 
@@ -40670,28 +41463,25 @@ Rapport généré par le système d'IA de gestion du stock
             if (!posId) return true;
             if (!product) return false;
             const strPosId = String(posId);
+            // BUG FIX (v34): Check posStocks FIRST before lockedToPosId
+            const _stockMap = product.posStocks || {};
+            const _transferEntry = _stockMap[strPosId] ?? _stockMap[posId] ?? null;
+            if (_transferEntry) {
+                const _tStock = Number(_transferEntry.stock ?? _transferEntry.quantity ?? 0);
+                if (Number.isFinite(_tStock) && _tStock > 0) return true;
+                if (_transferEntry.assigned === true) return true;
+                if (_transferEntry.lastMovement || _transferEntry.lastUpdated || _transferEntry.lastTransfer || _transferEntry.lastRestock) return true;
+            }
             if (product.lockedToPosId && String(product.lockedToPosId) !== strPosId) return false;
             if (product.posId !== null && product.posId !== undefined) {
                 if (String(product.posId) === strPosId) return true;
-                const stockMap = product.posStocks || {};
-                const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
-                if (!entry) return false;
-                const stock = Number(entry.stock ?? entry.quantity ?? 0);
-                if (Number.isFinite(stock) && stock > 0) return true;
-                if (entry.assigned === true) return true;
-                if (entry.lastMovement || entry.lastUpdated || entry.lastTransfer || entry.lastRestock) return true;
                 return false;
             }
             if (product.isMainWarehouse) return false;
-            const stockMap = product.posStocks || {};
-            const entry = stockMap[strPosId] ?? stockMap[posId] ?? null;
-            if (!entry) return false;
-            const stock = Number(entry.stock ?? entry.quantity ?? 0);
-            if (Number.isFinite(stock) && stock > 0) return true;
-            if (entry.assigned === true) return true;
-            if (entry.lastMovement || entry.lastUpdated || entry.lastTransfer || entry.lastRestock) return true;
-            if (Array.isArray(entry.variants) && entry.variants.length > 0) return true;
-            if (entry.price !== undefined && entry.price !== null && entry.price !== product.price) return true;
+            if (_transferEntry) {
+                if (Array.isArray(_transferEntry.variants) && _transferEntry.variants.length > 0) return true;
+                if (_transferEntry.price !== undefined && _transferEntry.price !== null && _transferEntry.price !== product.price) return true;
+            }
             return false;
         },
 
@@ -44512,8 +45302,11 @@ Rapport généré par le système d'IA de gestion du stock
             CORE.db.stockTransfers = CORE.db.stockTransfers || [];
             CORE.db.stockTransfers.push({
                 id: transferRef,
-                productId: productId,
+                productId: product._apiId || productId,
                 productName: product.name,
+                productSku: product.barcode || product.sku || null,
+                productPrice: product.price || 0,
+                productCategory: product.category || product.categoryId || null,
                 qty: qty,
                 sourcePosId: sourcePosId,
                 sourcePosName: sourcePos.name,
@@ -44690,8 +45483,11 @@ Rapport généré par le système d'IA de gestion du stock
 
                         // Créer le bon de transfert
                         const receipt = CORE.createTransferReceipt({
-                            productId: p.id,
+                            productId: p._apiId || p.id,
                             productName: p.name,
+                            productSku: p.barcode || null,
+                            productPrice: p.price || 0,
+                            productCategory: p.category || p.categoryId || null,
                             quantity: qty,
                             fromPosId: 'main_depot',
                             fromPosName: 'Dépôt principal',
@@ -45619,9 +46415,11 @@ Rapport généré par le système d'IA de gestion du stock
 
             const receipt = CORE.createTransferReceipt({
                 reference,
-                productId,
+                productId: product._apiId || product.id,
                 productName: product.name,
                 productSku: product.barcode || null,
+                productPrice: product.price || 0,
+                productCategory: product.category || null,
                 quantity: qty,
                 fromPosId: 'main_depot',
                 fromPosName: 'Dépôt principal',
@@ -45703,10 +46501,23 @@ Rapport généré par le système d'IA de gestion du stock
                 receipt.updatedAt = timestamp;
             }
 
+            // FIX: Set product.updatedAt so _smartMerge preserves the stock change
+            product.updatedAt = timestamp;
+
             CORE.markDirty('products');
             CORE.markDirty('stockMovements');
             CORE.markDirty('transferReceipts');
-            CORE.save();
+            // FIX: Use save(true) for IMMEDIATE localStorage write (not debounced)
+            // Previously used save() which debounces 1s — refresh before write = data loss
+            CORE.save(true);
+
+            // FIX: Force immediate cloud push (500ms) so destination POS sees the transfer
+            // Without this, cloud push is debounced 3s and stock reverts on refresh
+            clearTimeout(CORE._cloudPushTimer);
+            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                CORE._cloudPushTimer = setTimeout(() => CORE._doCloudPush(0), 500);
+            }
+
             UI.closeModal();
             UI.toast(`✓ ${qty} ${product.name} transféré(s) du dépôt principal à ${pos.name}`, 'success');
             ManagerModule._mainTransferMedia = [];
@@ -47507,34 +48318,67 @@ Rapport généré par le système d'IA de gestion du stock
 
             if ((product.stock || 0) < qty) return UI.toast('Stock insuffisant au dépôt', 'error');
 
-            // Réduire stock dépôt
-            const newMainStock = (product.stock || 0) - qty;
-            CORE.setProductStock(productId, null, newMainStock);
-
-            // Ajouter stock POS (utiliser posStocks via setProductStock)
-            const posStock = CORE.getProductStock(productId, posId);
-            CORE.setProductStock(productId, posId, posStock + qty);
-
-            // Enregistrer le transfert
-            CORE.db.stockTransfers = CORE.db.stockTransfers || [];
-            CORE.db.stockTransfers.push({
-                id: CORE.uid(),
-                productId,
-                productName: product.name,
-                fromWarehouse: true,
-                toPosId: posId,
-                qty,
-                status: 'completed',
-                createdBy: CORE.state.currentUser?.name || 'System',
-                createdAt: new Date().toISOString()
-            });
-            CORE.markDirty('stockTransfers');
-            CORE.markDirty('stockMovements');
-            CORE.save();
-
             const pos = CORE.getPOS(posId);
+            const timestamp = new Date().toISOString();
+
+            // Réduire stock dépôt
+            product.stock = Math.max(0, (product.stock || 0) - qty);
+            product.updatedAt = timestamp;
+            CORE._productIndex = null;
+
+            // Créer un transferReceipt (pending) — le gestionnaire doit confirmer la réception
+            const receipt = CORE.createTransferReceipt({
+                reference: `QT-${Utils.uid('QT').slice(0, 6)}`,
+                productId: product._apiId || product.id,
+                productName: product.name,
+                productSku: product.barcode || null,
+                productPrice: product.price || 0,
+                productCategory: product.category || null,
+                quantity: qty,
+                fromPosId: 'main_depot',
+                fromPosName: 'Dépôt principal',
+                toPosId: parseInt(posId, 10) || posId,
+                toPosName: pos?.name || 'POS',
+                note: 'Transfert rapide depuis dépôt',
+                meta: {
+                    transferType: 'quick_transfer',
+                    createdFrom: 'manager_quick_transfer'
+                }
+            });
+
+            // Enregistrer le mouvement de sortie du dépôt
+            CORE.recordStockMovement({
+                type: 'main_depot_transfer',
+                productId: product.id,
+                quantity: qty,
+                posId: null,
+                fromPosId: null,
+                toPosId: posId,
+                notes: 'Transfert rapide vers ' + (pos?.name || 'POS'),
+                reason: 'main_depot_transfer',
+                document: receipt?.reference || '',
+                timestamp,
+                meta: {
+                    source: 'manager_quick_transfer',
+                    direction: 'out',
+                    toPosId: posId,
+                    receiptId: receipt?.id || null
+                }
+            });
+
+            CORE.markDirty('products');
+            CORE.markDirty('stockMovements');
+            CORE.markDirty('transferReceipts');
+            CORE.save(true);
+
+            // Force immediate cloud push
+            clearTimeout(CORE._cloudPushTimer);
+            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                CORE._cloudPushTimer = setTimeout(() => CORE._doCloudPush(0), 500);
+            }
+
             UI.closeModal();
-            UI.toast(`${qty} unités transférées vers ${pos?.name || 'POS'}`, 'success');
+            UI.toast(`${qty} unités envoyées vers ${pos?.name || 'POS'} — en attente de réception`, 'success');
             App.rerender();
         },
 
@@ -50546,9 +51390,9 @@ Rapport généré par le système d'IA de gestion du stock
                                         <div class="text-sm text-emerald-700">De: ${t.sourcePosName || 'POS'} • ${t.qty} unité(s)</div>
                                         <div class="text-xs text-emerald-600 mt-1">${t.reason || ''}</div>
                                     </div>
-                                    <div class="text-right">
+                                    <div class="flex flex-col items-end gap-2">
                                         <div class="text-xs text-emerald-500">${new Date(t.createdAt).toLocaleDateString('fr-FR')}</div>
-                                        <span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-bold">EN ATTENTE</span>
+                                        <button onclick="ManagerModule.receiveTransfer('${t.id}','stockTransfers')" class="px-3 py-1.5 bg-emerald-600 text-white font-black rounded-lg text-xs hover:bg-emerald-700 transition">✅ Réceptionner</button>
                                     </div>
                                 </div>
                             </div>
@@ -50560,7 +51404,10 @@ Rapport généré par le système d'IA de gestion du stock
                                         <div class="font-black text-blue-900">${t.productName || t.id}</div>
                                         <div class="text-sm text-blue-700">De: ${t.fromPosName || 'Dépôt'} • ${t.quantity || 0} unité(s)</div>
                                     </div>
-                                    <div class="text-xs text-blue-500">${new Date(t.createdAt).toLocaleDateString('fr-FR')}</div>
+                                    <div class="flex flex-col items-end gap-2">
+                                        <div class="text-xs text-blue-500">${new Date(t.createdAt).toLocaleDateString('fr-FR')}</div>
+                                        <button onclick="ManagerModule.receiveTransfer('${t.id}','transferReceipts')" class="px-3 py-1.5 bg-blue-600 text-white font-black rounded-lg text-xs hover:bg-blue-700 transition">✅ Réceptionner</button>
+                                    </div>
                                 </div>
                             </div>
                         `).join('')}
@@ -50591,6 +51438,218 @@ Rapport généré par le système d'IA de gestion du stock
                     </div>
                 </div>
             `, [{ label: 'Fermer', onclick: 'UI.closeModal()' }]);
+        },
+
+        // ========== RÉCEPTION DES TRANSFERTS (Manager) ==========
+        // Delegates to GestionnaireModule's proven reception flow if available,
+        // otherwise implements inline reception with full product auto-creation support.
+        receiveTransfer(transferId, source) {
+            // Try to delegate to GestionnaireModule which has full reception UI with media upload
+            if (typeof GestionnaireModule !== 'undefined' && GestionnaireModule.showReceiveTransferModal) {
+                UI.closeModal();
+                return GestionnaireModule.showReceiveTransferModal(transferId);
+            }
+            // Fallback: inline reception (if GestionnaireModule not loaded)
+            let transfer = null;
+            if (source === 'transferReceipts') {
+                transfer = (CORE.db.transferReceipts || []).find(t => t.id === transferId);
+                if (transfer) {
+                    transfer = { ...transfer, sourcePosId: transfer.fromPosId, sourcePosName: transfer.fromPosName || 'Dépôt principal', destPosId: transfer.toPosId, destPosName: transfer.toPosName, qty: transfer.quantity || transfer.qty, _source: 'transferReceipts' };
+                }
+            } else {
+                transfer = (CORE.db.stockTransfers || []).find(t => t.id === transferId);
+                if (transfer) transfer = { ...transfer, _source: 'stockTransfers' };
+            }
+            if (!transfer) return UI.toast('Transfert introuvable', 'error');
+
+            UI.modal('✅ Confirmer la réception', `
+                <div class="space-y-4">
+                    <div class="p-4 bg-emerald-50 border border-emerald-200 rounded-xl">
+                        <div class="font-black text-emerald-900 text-lg">${transfer.productName || 'Produit'}</div>
+                        <div class="text-2xl font-black text-emerald-600 mt-1">${transfer.qty} unité(s)</div>
+                        <div class="text-sm text-emerald-700 mt-2">De: <strong>${transfer.sourcePosName || 'Dépôt'}</strong></div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-black text-slate-700 mb-1">📝 Note de réception (optionnel)</label>
+                        <textarea id="reception_note" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm" placeholder="Ex: Colis en bon état..."></textarea>
+                    </div>
+                    <div class="p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
+                        <strong>⚠ Important:</strong> En validant, le stock sera ajouté à votre inventaire.
+                    </div>
+                </div>
+            `, [
+                { label: 'Annuler', onclick: 'UI.closeModal()' },
+                { label: 'Confirmer la réception', onclick: "ManagerModule._executeReception('" + transferId + "','" + source + "')", class: 'px-5 py-2.5 bg-emerald-600 text-white font-black rounded-xl hover:bg-emerald-700' }
+            ]);
+        },
+
+        async _executeReception(transferId, source) {
+            // Pull latest products from cloud first
+            try {
+                if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                    const freshProducts = await API.request('/sync/products?light=1', { method: 'GET', timeout: 8000 });
+                    if (freshProducts && Array.isArray(freshProducts.data)) {
+                        CORE.db.products = API._smartMerge(CORE.db.products || [], freshProducts.data);
+                        CORE._productIndex = null;
+                        console.log('[MANAGER-RECEPTION] Pulled ' + freshProducts.data.length + ' products from cloud');
+                    }
+                }
+            } catch(e) { console.warn('[MANAGER-RECEPTION] Cloud pull failed:', e.message); }
+
+            // Find the actual transfer record (not a copy)
+            let transfer, transferSource;
+            if (source === 'transferReceipts') {
+                transfer = (CORE.db.transferReceipts || []).find(t => t.id === transferId);
+                transferSource = 'transferReceipts';
+            } else {
+                transfer = (CORE.db.stockTransfers || []).find(t => t.id === transferId);
+                transferSource = 'stockTransfers';
+            }
+            if (!transfer) { UI.closeModal(); return UI.toast('Transfert introuvable', 'error'); }
+
+            // Normalize fields
+            const productId = transfer.productId;
+            const destPosId = transferSource === 'transferReceipts' ? transfer.toPosId : transfer.destPosId;
+            const sourcePosName = transferSource === 'transferReceipts' ? (transfer.fromPosName || 'Dépôt') : (transfer.sourcePosName || 'POS');
+            const qty = Number(transferSource === 'transferReceipts' ? (transfer.quantity || transfer.qty) : transfer.qty) || 0;
+            const note = document.getElementById('reception_note')?.value?.trim() || '';
+
+            // Multi-criteria product search (same as GestionnaireModule)
+            const allProducts = CORE.db.products || [];
+            const pidStr = String(productId);
+            let product = allProducts.find(p => p.id == productId)
+                || allProducts.find(p => String(p.id) === pidStr)
+                || allProducts.find(p => p._origLocalId != null && String(p._origLocalId) === pidStr)
+                || allProducts.find(p => p._apiId != null && String(p._apiId) === pidStr)
+                || allProducts.find(p => p.barcode && transfer.productSku && p.barcode === transfer.productSku)
+                || allProducts.find(p => transfer.productName && p.name === transfer.productName);
+
+            console.log('[MANAGER-RECEPTION] Recherche produit:', { productId, pidStr, found: !!product, productFoundId: product?.id, productFoundName: product?.name });
+
+            // Auto-create product if not found
+            if (!product) {
+                const destPosStocks = {};
+                destPosStocks[destPosId] = { stock: 0, price: transfer.productPrice || 0, lastUpdated: new Date().toISOString() };
+                (CORE.db.pointsOfSale || []).forEach(loc => {
+                    if (!destPosStocks[loc.id]) destPosStocks[loc.id] = { stock: 0, price: transfer.productPrice || 0 };
+                });
+                product = CORE.create('products', {
+                    name: transfer.productName || 'Produit transféré',
+                    price: transfer.productPrice || 0,
+                    costPrice: transfer.productPrice || 0,
+                    categoryId: transfer.productCategory || null,
+                    category: transfer.productCategory || null,
+                    barcode: transfer.productSku || null,
+                    sku: transfer.productSku || null,
+                    description: 'Produit créé automatiquement lors du transfert depuis ' + sourcePosName,
+                    stock: 0,
+                    minStock: 5,
+                    posStocks: destPosStocks,
+                    posId: destPosId,
+                    storeId: destPosId,
+                    active: true,
+                    createdViaTransfer: true,
+                    originalTransferId: transferId,
+                    originalProductId: productId,
+                    _apiId: (typeof productId === 'string' && /^[0-9a-f]{8}-/i.test(productId)) ? productId : null
+                });
+                CORE._productIndex = null;
+                console.log('[MANAGER-RECEPTION] Nouveau produit créé (id=' + product.id + '):', product.name);
+                UI.toast('ℹ️ Nouveau produit créé: ' + product.name, 'info');
+            }
+
+            // Update transfer status
+            transfer.status = 'accepted';
+            transfer.receivedBy = CORE.state.currentUser?.id;
+            transfer.receivedByName = CORE.state.currentUser?.name || 'Manager';
+            transfer.receivedAt = new Date().toISOString();
+            transfer.receptionNote = note;
+
+            // BUG FIX (v34): Clear lockedToPosId for transferred products
+            if (product.lockedToPosId && String(product.lockedToPosId) !== String(destPosId)) {
+                console.log('[MANAGER-RECEPTION] Clearing lockedToPosId=' + product.lockedToPosId + ' for product ' + product.id + ' received at POS ' + destPosId);
+                product.lockedToPosId = null;
+            }
+
+            // Add stock to destination POS
+            if (!product.posStocks) product.posStocks = {};
+            if (!product.posStocks[destPosId]) product.posStocks[destPosId] = { stock: 0, price: product.price || 0 };
+            const currentStock = Number(product.posStocks[destPosId].stock) || 0;
+            const newStock = currentStock + qty;
+            product.posStocks[destPosId].stock = newStock;
+            product.posStocks[destPosId].lastUpdated = new Date().toISOString();
+            product.posStocks[destPosId].lastTransfer = new Date().toISOString();
+
+            // Decrement pendingIncoming
+            if (product.posStocks[destPosId].pendingIncoming) {
+                product.posStocks[destPosId].pendingIncoming = Math.max(0, Number(product.posStocks[destPosId].pendingIncoming) - qty);
+            }
+
+            // Update master stock if product belongs to this POS
+            if (product.posId && String(product.posId) === String(destPosId)) {
+                product.stock = newStock;
+            }
+            product.updatedAt = new Date().toISOString();
+            CORE._productIndex = null;
+
+            console.log('[MANAGER-RECEPTION] Stock mis à jour:', { produit: product.name, posId: destPosId, avant: currentStock, après: newStock, qty });
+
+            // Record stock movement
+            CORE.db.stockMovements = CORE.db.stockMovements || [];
+            CORE.db.stockMovements.push({
+                id: 'MOV-' + CORE.uid(),
+                productId: product.id,
+                productName: product.name,
+                type: 'transfer_in',
+                quantity: qty, qty: qty,
+                ref: transferId,
+                note: 'Réception transfert depuis ' + sourcePosName + (note ? ' - ' + note : ''),
+                posId: destPosId,
+                createdBy: CORE.state.currentUser?.id,
+                createdByName: CORE.state.currentUser?.name,
+                createdAt: new Date().toISOString(),
+                status: 'completed'
+            });
+
+            CORE.markDirty('products');
+            CORE.markDirty(transferSource);
+            CORE.markDirty('stockMovements');
+            CORE.save(true);
+
+            // BUG FIX (v36): Verify the product is actually visible after save
+            var _verifyProduct2 = (CORE.db.products || []).find(function(p) { return p.id === product.id; });
+            if (_verifyProduct2) {
+                var _vps2 = _verifyProduct2.posStocks || {};
+                var _hasDestStock2 = _vps2[destPosId] || _vps2[String(destPosId)];
+                console.log('[MANAGER-RECEPTION] ✅ Verification:', {
+                    productId: _verifyProduct2.id, productName: _verifyProduct2.name,
+                    destPosId: destPosId, hasDestStock: !!_hasDestStock2,
+                    destStock: _hasDestStock2 ? _hasDestStock2.stock : 'N/A',
+                    posStocksKeys: Object.keys(_vps2),
+                    userPos: CORE.state.currentUser?.pos
+                });
+                var _canSee2 = CORE.canAccess('product', _verifyProduct2);
+                if (!_canSee2) {
+                    console.error('[MANAGER-RECEPTION] ❌ Product NOT VISIBLE! Applying emergency fix...');
+                    var _userPosStr2 = String(CORE.state.currentUser?.pos || CORE.state.currentUser?.storeId || '');
+                    if (_userPosStr2 && !_vps2[_userPosStr2]) {
+                        _verifyProduct2.posStocks[_userPosStr2] = { stock: newStock, price: _verifyProduct2.price || 0, lastUpdated: new Date().toISOString(), lastTransfer: new Date().toISOString() };
+                        _verifyProduct2.updatedAt = new Date().toISOString();
+                        CORE._productIndex = null;
+                        CORE.save(true);
+                    }
+                }
+            }
+
+            // SYNC FIX: Force immediate cloud push
+            clearTimeout(CORE._cloudPushTimer);
+            if (typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() && navigator.onLine) {
+                CORE._cloudPushTimer = setTimeout(() => CORE._doCloudPush(0), 500);
+            }
+
+            UI.closeModal();
+            UI.toast('✅ Transfert réceptionné: +' + qty + ' ' + product.name, 'success');
+            App.rerender();
         },
 
         reassignDelivery(deliveryId) {
@@ -51364,12 +52423,12 @@ Rapport généré par le système d'IA de gestion du stock
 
                         <!-- Navigation -->
                         <nav class="flex-1 px-4 py-2 space-y-1 overflow-y-auto">
-                            ${this.renderNav('dashboard','layout-grid','Dashboard')}
+                            ${this.renderNav('dashboard','layout-grid','Dashboard', CORE.getUnreadNotificationCount())}
                             ${this.renderNav('analytics','bar-chart-3','Analytique')}
                             ${this.renderNav('pos','store','Points de vente')}
                             ${this.renderNav('inventory','box','Stocks (Pro)')}
-                            ${this.renderNav('main-stock','warehouse','🏭 Stock Dépôt Principal')}
-                            ${this.renderNav('commandes','shopping-cart','Commandes (Ventes)')}
+                            ${this.renderNav('main-stock','warehouse','🏭 Stock Dépôt Principal', (CORE.db.transferReceipts || []).filter(t => t.status === 'pending').length)}
+                            ${this.renderNav('commandes','shopping-cart','Commandes (Ventes)', (CORE.db.orders || []).filter(o => o.status === 'pending' || o.status === 'new').length)}
                             ${this.renderNav('finance','wallet','Finances')}
                             ${this.renderNav('team','users','Équipe')}
                             ${this.renderNav('toolbox','command','Centre Commande')}
@@ -51388,12 +52447,13 @@ Rapport généré par le système d'IA de gestion du stock
                 </div>`;
         },
 
-        renderNav(view, icon, label) {
+        renderNav(view, icon, label, badge = 0) {
             const active = this.state.currentView === view;
             return `
                 <button onclick="ManagerModule.navigateTo('${view}')" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group ${active ? 'bg-gradient-to-r from-blue-500/20 to-indigo-500/10 text-blue-400 border-l-2 border-blue-400' : 'text-slate-400 hover:bg-white/5 hover:text-white'}">
-                    <div class="w-9 h-9 rounded-xl ${active ? 'bg-blue-500/20' : 'bg-white/5 group-hover:bg-white/10'} flex items-center justify-center transition-all duration-200">
+                    <div class="w-9 h-9 rounded-xl ${active ? 'bg-blue-500/20' : 'bg-white/5 group-hover:bg-white/10'} flex items-center justify-center transition-all duration-200 relative">
                         <i data-lucide="${icon}" class="w-5 h-5 ${active ? 'drop-shadow-[0_0_8px_rgba(59,130,246,0.5)]' : ''}"></i>
+                        ${badge > 0 ? `<span class="absolute -top-1 -right-1 min-w-[18px] h-[18px] bg-red-500 text-white text-[10px] font-black rounded-full flex items-center justify-center animate-pulse shadow-lg shadow-red-500/40">${badge > 9 ? '9+' : badge}</span>` : ''}
                     </div>
                     <span class="font-bold text-sm">${label}</span>
                     ${active ? '<div class="ml-auto w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>' : ''}
@@ -56668,12 +57728,13 @@ Rapport généré par le système d'IA de gestion du stock
             setTimeout(() => App.rerender(), 500);
         },
 
-        renderNavItem(view, icon, label) {
+        renderNavItem(view, icon, label, badge = 0) {
             const active = this.state.currentView === view;
             return `
                 <button onclick="PDGModule.navigateTo('${view}')" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group ${active ? 'bg-gradient-to-r from-violet-500/20 to-purple-500/10 text-purple-300 border-l-2 border-purple-400' : 'text-slate-400 hover:bg-white/5 hover:text-white'}">
-                    <div class="w-9 h-9 rounded-xl ${active ? 'bg-purple-500/20' : 'bg-white/5 group-hover:bg-white/10'} flex items-center justify-center transition-all duration-200">
+                    <div class="w-9 h-9 rounded-xl ${active ? 'bg-purple-500/20' : 'bg-white/5 group-hover:bg-white/10'} flex items-center justify-center transition-all duration-200 relative">
                         <i data-lucide="${icon}" class="w-5 h-5 ${active ? 'drop-shadow-[0_0_8px_rgba(139,92,246,0.5)]' : ''}"></i>
+                        ${badge > 0 ? `<span class="absolute -top-1 -right-1 min-w-[18px] h-[18px] bg-red-500 text-white text-[10px] font-black rounded-full flex items-center justify-center animate-pulse shadow-lg shadow-red-500/40">${badge > 9 ? '9+' : badge}</span>` : ''}
                     </div>
                     <span class="font-bold text-sm">${label}</span>
                     ${active ? '<div class="ml-auto w-2 h-2 bg-purple-400 rounded-full animate-pulse"></div>' : ''}
@@ -59327,11 +60388,11 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
 
                         <!-- Navigation -->
                         <nav class="flex-1 px-4 py-2 space-y-1 overflow-y-auto scrollbar-thin scrollbar-thumb-purple-500/30 scrollbar-track-transparent">
-                            ${this.renderNavItem('overview','layout-dashboard','Aperçu')}
-                            ${this.renderNavItem('orders','receipt','Commandes (ventes)')}
+                            ${this.renderNavItem('overview','layout-dashboard','Aperçu', CORE.getUnreadNotificationCount())}
+                            ${this.renderNavItem('orders','receipt','Commandes (ventes)', (CORE.db.orders || []).filter(o => o.status === 'pending' || o.status === 'new').length)}
                             ${this.renderNavItem('commandes','shopping-cart','Gestion réappro')}
-                            ${this.renderNavItem('main-stock','warehouse','🏭 Stock Dépôt Principal')}
-                            ${this.renderNavItem('deliveries','truck','Livraisons')}
+                            ${this.renderNavItem('main-stock','warehouse','🏭 Stock Dépôt Principal', (CORE.db.transferReceipts || []).filter(t => t.status === 'pending').length)}
+                            ${this.renderNavItem('deliveries','truck','Livraisons', (CORE.getVisibleDeliveries ? CORE.getVisibleDeliveries().filter(d => d.status === 'pending' || d.status === 'assigned').length : 0))}
                             ${this.renderNavItem('stock','box','Stock')}
                             ${this.renderNavItem('pos','store','Points de vente')}
                             ${this.renderNavItem('finance','wallet','Finances')}
@@ -61958,6 +63019,35 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             'backups', 'pendingSyncs', 'syncHistory'
         ],
 
+        // P5: Global sync push mutex — prevents concurrent push storms
+        _isSyncPushing: false,
+        _syncPushStart: 0,
+        // P5: Per-collection failure tracking with exponential backoff
+        _colFailures: {},  // { collectionName: { count: N, lastFail: timestamp } }
+
+        _shouldSkipCollection(col) {
+            var info = this._colFailures[col];
+            if (!info || info.count === 0) return false;
+            // Exponential backoff: 30s, 60s, 120s, 240s, max 300s
+            var backoff = Math.min(30000 * Math.pow(2, info.count - 1), 300000);
+            var elapsed = Date.now() - info.lastFail;
+            if (elapsed < backoff) {
+                console.log('[SYNC-BACKOFF] Skipping ' + col + ' (failed ' + info.count + 'x, retry in ' + Math.round((backoff - elapsed)/1000) + 's)');
+                return true;
+            }
+            return false;
+        },
+
+        _recordColFailure(col) {
+            if (!this._colFailures[col]) this._colFailures[col] = { count: 0, lastFail: 0 };
+            this._colFailures[col].count++;
+            this._colFailures[col].lastFail = Date.now();
+        },
+
+        _recordColSuccess(col) {
+            if (this._colFailures[col]) this._colFailures[col] = { count: 0, lastFail: 0 };
+        },
+
         /** Push only DIRTY collections to /sync endpoint (P4: incremental deltas, fallback to full PUT) */
         async syncDirtyToCloud(dirtyList) {
             if (!this.isAuthenticated() || !navigator.onLine) {
@@ -61966,6 +63056,27 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 noAuthErr._noAuth = true;
                 throw noAuthErr;
             }
+
+            // P5: Global mutex — only one push at a time
+            if (this._isSyncPushing) {
+                var pushAge = Date.now() - this._syncPushStart;
+                if (pushAge < 90000) { // Allow auto-reset after 90s (was 120s — reduced to recover faster)
+                    console.log('[SYNC-DIRTY] Another push in progress (' + Math.round(pushAge/1000) + 's) — skipping');
+                    return true;
+                }
+                console.warn('[SYNC-DIRTY] Resetting stuck push lock after ' + Math.round(pushAge/1000) + 's');
+            }
+            this._isSyncPushing = true;
+            this._syncPushStart = Date.now();
+
+            try {
+                return await this._syncDirtyToCloudInner(dirtyList);
+            } finally {
+                this._isSyncPushing = false;
+            }
+        },
+
+        async _syncDirtyToCloudInner(dirtyList) {
             var dirty = dirtyList || CORE.getDirtyCollections();
             if (dirty.length === 0) {
                 console.log('[SYNC-DIRTY] No dirty collections to push');
@@ -61979,24 +63090,69 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     var col = dirtyArr[i];
                     var data = CORE.db[col];
                     if (Array.isArray(data)) {
-                        collections[col] = data;
+                        // v36: Deep-copy and strip bloated transfer/movement data before push
+                        if (col === 'transferReceipts' || col === 'stockTransfers') {
+                            var stripped = [];
+                            for (var si = 0; si < data.length; si++) {
+                                var copy = Object.assign({}, data[si]);
+                                ['sendMedia', 'receptionMedia', 'rejectionMedia', 'media', 'photos', 'attachments'].forEach(function(mf) {
+                                    if (Array.isArray(copy[mf])) {
+                                        copy[mf] = copy[mf].map(function(m) {
+                                            return m && m.stripped ? m : { type: m?.type, name: m?.name, stripped: true };
+                                        });
+                                    }
+                                });
+                                // Strip any string field > 5KB
+                                Object.keys(copy).forEach(function(k) {
+                                    if (typeof copy[k] === 'string' && copy[k].length > 5000 && k !== 'id' && k !== '_id' && k !== '_apiId') {
+                                        copy[k] = copy[k].substring(0, 200) + '...[truncated]';
+                                    }
+                                });
+                                stripped.push(copy);
+                            }
+                            collections[col] = stripped;
+                        } else if (col === 'stockMovements') {
+                            var strippedMov = [];
+                            for (var smi = 0; smi < data.length; smi++) {
+                                var mcopy = Object.assign({}, data[smi]);
+                                delete mcopy.productSnapshot;
+                                delete mcopy.beforeSnapshot;
+                                delete mcopy.afterSnapshot;
+                                if (mcopy.details && typeof mcopy.details === 'string' && mcopy.details.length > 500) {
+                                    mcopy.details = mcopy.details.substring(0, 200) + '...[truncated]';
+                                }
+                                strippedMov.push(mcopy);
+                            }
+                            collections[col] = strippedMov;
+                        } else {
+                            collections[col] = data;
+                        }
                     }
                 }
                 // P7: Filter out items with non-UUID IDs (integer IDs crash PostgreSQL UUID columns)
                 // NOTE: Only filter collections that are stored in PostgreSQL tables with UUID primary keys.
                 // stockMovements, stockTransfers, transferReceipts are stored as JSON blobs in tenant_data — no UUID filtering needed.
+                // BUG FIX: Create shallow copies before mutating IDs for the push.
+                // Previously, item.id = item._apiId mutated the ORIGINAL objects in CORE.db,
+                // breaking all subsequent lookups by the original integer ID (getProduct, getProductStock, etc.).
                 var _isUUID2 = function(v) { return typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v); };
                 var uuidCols2 = ['products', 'orders', 'clients', 'categories', 'stores', 'deliveries', 'returns'];
                 for (var uc2 = 0; uc2 < uuidCols2.length; uc2++) {
                     var ucol2 = uuidCols2[uc2];
                     if (collections[ucol2] && Array.isArray(collections[ucol2])) {
-                        collections[ucol2] = collections[ucol2].filter(function(item) {
+                        var mapped = [];
+                        for (var mi = 0; mi < collections[ucol2].length; mi++) {
+                            var item = collections[ucol2][mi];
                             if (item._apiId && _isUUID2(String(item._apiId))) {
-                                item._origLocalId = item.id; item.id = item._apiId; return true;
+                                // SHALLOW COPY — never mutate the original in CORE.db
+                                mapped.push(Object.assign({}, item, { _origLocalId: item.id, id: item._apiId }));
+                            } else if (_isUUID2(String(item.id))) {
+                                mapped.push(item); // already has UUID id, safe to send as-is
                             }
-                            return _isUUID2(String(item.id));
-                        });
-                        if (collections[ucol2].length === 0) delete collections[ucol2];
+                            // else: skip items with non-UUID ids and no _apiId
+                        }
+                        collections[ucol2] = mapped.length > 0 ? mapped : undefined;
+                        if (!collections[ucol2]) delete collections[ucol2];
                     }
                 }
                 var keys = Object.keys(collections);
@@ -62012,7 +63168,8 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 try {
                     var bulkResult = await this.request('/sync', {
                         method: 'PUT',
-                        body: { collections: collections }
+                        body: { collections: collections },
+                        timeout: 30000  // Reduced from 45s — payloads are lighter after media stripping
                     });
                     if (bulkResult && bulkResult.versions) {
                         pushedVersions = bulkResult.versions;
@@ -62020,13 +63177,29 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 } catch(bulkErr) {
                     // Fallback: if bulk endpoint fails (404/500), try per-collection
                     console.warn('[SYNC-DIRTY] Bulk PUT failed, falling back to per-collection:', bulkErr.message);
-                    // Large collections need more timeout for CockroachDB writes
-                    var _largeCols = { cities: 1, stockMovements: 1, products: 1, orders: 1, clients: 1 };
+                    if (bulkErr.data) console.warn('[SYNC-DIRTY] Server detail:', JSON.stringify(bulkErr.data));
+                    // P5: Per-collection fallback with circuit-breaker and backoff
+                    var _largeCols = { cities: 1, stockMovements: 1, products: 1, orders: 1, clients: 1, stockTransfers: 1, transferReceipts: 1 };
+                    var consecutiveFails = 0;
+                    var fallbackBudgetMs = 60000; // Max 60s total for all per-collection PUTs
+                    var fallbackStart = Date.now();
                     for (var pi = 0; pi < keys.length; pi++) {
                         var pcol = keys[pi];
+                        // Circuit-breaker: abort if 3 consecutive collections failed
+                        if (consecutiveFails >= 3) {
+                            console.warn('[SYNC-DIRTY] Circuit-breaker: ' + consecutiveFails + ' consecutive failures — aborting remaining ' + (keys.length - pi) + ' collections');
+                            break;
+                        }
+                        // Time budget: abort if we've been in fallback too long
+                        if (Date.now() - fallbackStart > fallbackBudgetMs) {
+                            console.warn('[SYNC-DIRTY] Time budget exhausted (' + Math.round(fallbackBudgetMs/1000) + 's) — aborting remaining ' + (keys.length - pi) + ' collections');
+                            break;
+                        }
+                        // Backoff: skip collections that recently failed
+                        if (API._shouldSkipCollection(pcol)) continue;
                         var pData = collections[pcol] || [];
                         try {
-                            var _putTimeout = _largeCols[pcol] ? 90000 : 45000;
+                            var _putTimeout = _largeCols[pcol] ? 30000 : 15000; // Reduced timeouts to fail faster
                             var putResult = await this.request('/sync/' + encodeURIComponent(pcol), {
                                 method: 'PUT',
                                 body: { data: pData },
@@ -62035,8 +63208,12 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                             if (putResult && typeof putResult.version === 'number') {
                                 pushedVersions[pcol] = putResult.version;
                             }
+                            consecutiveFails = 0;
+                            API._recordColSuccess(pcol);
                         } catch(perColErr) {
                             console.warn('[SYNC-DIRTY] PUT ' + pcol + ' failed:', perColErr.message);
+                            consecutiveFails++;
+                            API._recordColFailure(pcol);
                         }
                     }
                 }
@@ -62124,11 +63301,19 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             if (!Array.isArray(localArr) || localArr.length === 0) return cloudArr || [];
             if (!Array.isArray(cloudArr) || cloudArr.length === 0) return localArr || [];
 
+            // Invalidate product/user indexes since we'll return a new array of objects
+            if (typeof CORE !== 'undefined') { CORE._productIndex = null; CORE._userIndex = null; }
+
             // Build maps by ID for O(1) lookup
             var localMap = {};
+            // BUG FIX: Also index local items by their _apiId so that cloud items
+            // (which have UUID as id) can match local items (which have integer id + _apiId=UUID).
+            // Without this, every merge creates duplicates: local(id=1) + cloud(id=UUID) for the same product.
+            var localByApiId = {};
             for (var i = 0; i < localArr.length; i++) {
                 var li = localArr[i];
                 if (li && li.id != null) localMap[String(li.id)] = li;
+                if (li && li._apiId) localByApiId[String(li._apiId)] = li;
             }
             var cloudMap = {};
             for (var j = 0; j < cloudArr.length; j++) {
@@ -62137,7 +63322,8 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             }
 
             var merged = [];
-            var processedIds = {};
+            var processedIds = {};  // tracks cloud IDs that were processed
+            var processedLocalIds = {};  // tracks local integer IDs that were matched via _apiId
 
             // Pass 1: Process cloud items (cloud data is authoritative for items it has)
             for (var c = 0; c < cloudArr.length; c++) {
@@ -62145,14 +63331,23 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 if (!cloudItem || cloudItem.id == null) { merged.push(cloudItem); continue; }
                 var idStr = String(cloudItem.id);
                 processedIds[idStr] = true;
-                var localItem = localMap[idStr];
+                // Try direct ID match first, then match via _apiId
+                var localItem = localMap[idStr] || localByApiId[idStr];
 
                 if (!localItem) {
                     // Cloud-only item → take as-is
                     merged.push(cloudItem);
                 } else {
-                    // Exists in both — intelligent merge
-                    merged.push(this._mergeItems(localItem, cloudItem));
+                    // Exists in both — intelligent merge, preserving local integer ID and _apiId
+                    var mergedItem = this._mergeItems(localItem, cloudItem);
+                    // Preserve the local integer ID so CORE.create / getProduct lookups still work
+                    if (typeof localItem.id === 'number' && typeof cloudItem.id === 'string') {
+                        mergedItem.id = localItem.id;
+                        mergedItem._apiId = cloudItem.id;
+                    }
+                    merged.push(mergedItem);
+                    // Mark the local integer ID as processed so Pass 2 skips it
+                    if (localItem.id != null) processedLocalIds[String(localItem.id)] = true;
                 }
             }
 
@@ -62160,9 +63355,10 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             for (var l = 0; l < localArr.length; l++) {
                 var lItem = localArr[l];
                 if (!lItem || lItem.id == null) continue;
-                if (!processedIds[String(lItem.id)]) {
-                    merged.push(lItem);
-                }
+                var lIdStr = String(lItem.id);
+                // Skip if already processed by ID match or _apiId match
+                if (processedIds[lIdStr] || processedLocalIds[lIdStr]) continue;
+                merged.push(lItem);
             }
 
             return merged;
@@ -62221,7 +63417,50 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             for (var j = 0; j < winnerKeys.length; j++) {
                 var wk = winnerKeys[j];
                 if (winner[wk] !== null && winner[wk] !== undefined) {
-                    result[wk] = winner[wk];
+                    // BUG FIX (v36): Deep-merge posStocks instead of replacing it.
+                    // Without this, when cloud (winner) has posStocks={POS_A: {stock:10}}
+                    // and local (loser) has posStocks={POS_A: {stock:10}, POS_B: {stock:5}},
+                    // the POS_B entry (added via transfer reception) gets LOST because
+                    // cloud wins and replaces the whole posStocks object.
+                    // Same applies to posDataByLocation and other nested stock maps.
+                    if (wk === 'posStocks' && typeof winner[wk] === 'object' && !Array.isArray(winner[wk])
+                        && typeof result[wk] === 'object' && !Array.isArray(result[wk])) {
+                        // Merge: keep all POS entries from both sides, winner's entries override loser's
+                        var mergedStocks = {};
+                        var loserStocks = result[wk] || {};
+                        var winnerStocks = winner[wk];
+                        // First, copy loser's entries (these may include transfer-received stock)
+                        var lsKeys = Object.keys(loserStocks);
+                        for (var ls = 0; ls < lsKeys.length; ls++) {
+                            mergedStocks[lsKeys[ls]] = loserStocks[lsKeys[ls]];
+                        }
+                        // Then overlay winner's entries (cloud is authoritative for POS it knows about)
+                        var wsKeys = Object.keys(winnerStocks);
+                        for (var ws = 0; ws < wsKeys.length; ws++) {
+                            var wsKey = wsKeys[ws];
+                            if (mergedStocks[wsKey] && typeof mergedStocks[wsKey] === 'object' && typeof winnerStocks[wsKey] === 'object') {
+                                // Both have this POS entry — compare timestamps to decide winner
+                                var localEntry = mergedStocks[wsKey];
+                                var cloudEntry = winnerStocks[wsKey];
+                                var localTs = localEntry.lastUpdated || localEntry.lastTransfer || '';
+                                var cloudTs = cloudEntry.lastUpdated || cloudEntry.lastTransfer || '';
+                                if (localTs && cloudTs && new Date(localTs).getTime() > new Date(cloudTs).getTime()) {
+                                    // Local entry is newer (e.g., just received a transfer) — keep local
+                                    // but merge in cloud-only fields
+                                    mergedStocks[wsKey] = Object.assign({}, cloudEntry, localEntry);
+                                } else {
+                                    // Cloud entry is newer or same — cloud wins but keep local-only fields
+                                    mergedStocks[wsKey] = Object.assign({}, localEntry, cloudEntry);
+                                }
+                            } else {
+                                // Only winner has this entry, or it's not an object — take winner's
+                                mergedStocks[wsKey] = winnerStocks[wsKey];
+                            }
+                        }
+                        result[wk] = mergedStocks;
+                    } else {
+                        result[wk] = winner[wk];
+                    }
                 }
             }
 
@@ -62240,44 +63479,71 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
 
         /**
          * Pull only critical collections (stockTransfers, notifications) from cloud.
-         * Used during light sync and idle cycles so incoming transfers appear within ~5 min
-         * instead of waiting for a full sync (~25 min).
+         * PERF: Uses single bulk GET instead of 3 separate requests.
+         * Used during light sync and idle cycles so incoming transfers appear promptly.
          * @returns {Promise<boolean>} true if any data was merged
          */
         async _pullCriticalCollections() {
             if (!this.isAuthenticated() || !navigator.onLine) return false;
-            // PERF: Only pull the 2 truly critical collections (not products — too heavy for idle sync)
-            var criticalCols = ['stockTransfers', 'notifications'];
-            var merged = false;
-            var _totalT0 = performance.now();
-            for (var ci = 0; ci < criticalCols.length; ci++) {
-                var col = criticalCols[ci];
-                // Time-box: stop if we've already spent >12s on critical pulls
-                if (performance.now() - _totalT0 > 12000) {
-                    console.warn('[SYNC-CRITICAL] Time-box reached (12s) — skipping remaining collections');
-                    break;
-                }
-                try {
-                    var resp = await this.request('/sync/' + col + '?light=1', { method: 'GET', timeout: 12000, retries: 0 });
-                    if (resp && Array.isArray(resp.data) && resp.data.length > 0) {
-                        var localArr = CORE.db[col];
-                        if (!Array.isArray(localArr)) {
-                            CORE.db[col] = resp.data;
-                        } else {
-                            CORE.db[col] = this._smartMerge(localArr, resp.data);
-                        }
-                        if (typeof resp.version === 'number') {
-                            this.updateCloudVersions({ [col]: resp.version });
-                        }
-                        merged = true;
-                        console.log('[SYNC-CRITICAL] ' + col + ': ' + resp.data.length + ' items merged');
+            // PERF: Cooldown — skip if pulled less than 30s ago (prevents tab-switch spam)
+            var now = Date.now();
+            if (this._lastCriticalPull && (now - this._lastCriticalPull < 30000)) return false;
+            this._lastCriticalPull = now;
+            
+            // PERF: Single bulk request for ALL critical collections instead of 3 sequential requests
+            // This reduces idle request count from 3/cycle to 1/cycle (67% reduction)
+            var criticalCols = ['stockTransfers', 'transferReceipts', 'notifications'];
+            try {
+                // Use /sync/meta to check if anything changed first
+                var versionsParam = criticalCols.map(function(c) {
+                    var v = API._cloudVersions ? (API._cloudVersions[c] || 0) : 0;
+                    return c + ':' + v;
+                }).join(',');
+                var resp = await this.request('/sync/bulk?collections=' + criticalCols.join(',') + '&versions=' + encodeURIComponent(versionsParam) + '&light=1', {
+                    method: 'GET', timeout: 15000, retries: 0
+                });
+                
+                // If bulk endpoint not available (404), fall back to single most important collection
+                if (!resp || resp._status === 404) {
+                    // Fallback: just pull stockTransfers + transferReceipts in ONE call each (skip notifications)
+                    var merged = false;
+                    var fallbackCols = ['stockTransfers', 'transferReceipts'];
+                    for (var fi = 0; fi < fallbackCols.length; fi++) {
+                        var fc = fallbackCols[fi];
+                        try {
+                            var fr = await this.request('/sync/' + fc + '?light=1', { method: 'GET', timeout: 12000, retries: 0 });
+                            if (fr && Array.isArray(fr.data) && fr.data.length > 0) {
+                                var localArr = CORE.db[fc];
+                                CORE.db[fc] = Array.isArray(localArr) ? this._smartMerge(localArr, fr.data) : fr.data;
+                                if (typeof fr.version === 'number') this.updateCloudVersions({ [fc]: fr.version });
+                                merged = true;
+                            }
+                        } catch(fe) { /* skip */ }
                     }
-                } catch(e) {
-                    console.warn('[SYNC-CRITICAL] Pull ' + col + ' failed:', e.message);
+                    if (merged) CORE.save();
+                    return merged;
                 }
+                
+                // Bulk response: { collections: { stockTransfers: { data: [...], version: N }, ... } }
+                var merged = false;
+                if (resp && resp.collections) {
+                    for (var ci = 0; ci < criticalCols.length; ci++) {
+                        var col = criticalCols[ci];
+                        var colResp = resp.collections[col];
+                        if (colResp && Array.isArray(colResp.data) && colResp.data.length > 0) {
+                            var localArr = CORE.db[col];
+                            CORE.db[col] = Array.isArray(localArr) ? this._smartMerge(localArr, colResp.data) : colResp.data;
+                            if (typeof colResp.version === 'number') this.updateCloudVersions({ [col]: colResp.version });
+                            merged = true;
+                        }
+                    }
+                }
+                if (merged) CORE.save();
+                return merged;
+            } catch(e) {
+                console.warn('[SYNC-CRITICAL] Pull failed:', e.message);
+                return false;
             }
-            if (merged) CORE.save();
-            return merged;
         },
 
         /** Pull ALL collections from /sync endpoint into CORE.db
@@ -62339,6 +63605,16 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     var localArr = CORE.db[bcol.collection];
                     if (!Array.isArray(localArr)) { CORE.db[bcol.collection] = allData; }
                     else { CORE.db[bcol.collection] = API._smartMerge(localArr, allData); }
+                    // Strip base64 images from products after cloud merge to prevent localStorage bloat
+                    if (bcol.collection === 'products' && Array.isArray(CORE.db.products)) {
+                        CORE.db.products.forEach(function(p) {
+                            if (p.image && typeof p.image === 'string' && p.image.startsWith('data:')) {
+                                p.image = '';
+                            }
+                        });
+                    }
+                    // Strip productImages entirely — images should be served from cloud/CDN
+                    if (bcol.collection === 'productImages') { CORE.db.productImages = []; }
                     if (cloudVersion !== null) this.updateCloudVersions({ [bcol.collection]: cloudVersion });
                     merged++;
                     console.log('[SYNC-ALL] ' + bcol.collection + ': ' + allData.length + ' items merged');
@@ -62729,7 +64005,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                     var _warmBase = (API.baseUrl || _API_DEFAULT_URL).replace(/\/api\/?$/, '');
                     var _warmOk = false;
                     var _warmAttempts = 3;
-                    var _warmTimeouts = [20000, 15000, 10000]; // 1st: 20s (cold start), 2nd: 15s, 3rd: 10s
+                    var _warmTimeouts = [25000, 30000, 35000]; // Increasing timeouts for Railway cold-start (can take 30s+)
 
                     async function _pingBackend(timeoutMs) {
                         return new Promise(function(resolve, reject) {
@@ -62883,7 +64159,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             } catch(e) { console.warn('[INVITE] URL parse error:', e); }
 
             // === PERIODIC CLOUD SYNC (P1: smart intervals — PERF OPTIMIZED) ===
-            // Light sync every 60s (push dirty + pull critical). Full sync every 5th cycle (~5 min).
+            // Light sync every 180s (push dirty + pull critical). Full sync every 5th cycle (~15 min).
             // PERF: Skip when tab hidden. Skip syncFromApi (redundant with syncAllFromCloud).
             this._syncCycleCount = 0;
             // P3-2: Store interval ID so it can be cleared on logout/role-switch
@@ -63031,7 +64307,8 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         })();
                     }
                 }
-            }, 60000); // Sync every 60s (1 min) for responsive cross-device transfers
+            }, 180000); // PERF: Sync every 180s (3 min) instead of 60s — reduces idle requests by 67%
+            // Transfers still appear promptly via visibilityChange pull + forced 500ms push on action
 
             // SYNC FIX: Pull critical collections immediately when user switches back to this tab
             // This ensures transfers appear right away when a gestionnaire returns to the app
@@ -63039,9 +64316,9 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 if (document.visibilityState === 'visible' &&
                     typeof API !== 'undefined' && API.isAuthenticated && API.isAuthenticated() &&
                     CORE.state.isOnline && CORE.state.currentUser && !CORE._isSyncing) {
-                    // Throttle: don't pull if last pull was < 10s ago
+                    // Throttle: don't pull if last pull was < 30s ago
                     var now = Date.now();
-                    if (App._lastVisibilityPull && (now - App._lastVisibilityPull < 10000)) return;
+                    if (App._lastVisibilityPull && (now - App._lastVisibilityPull < 30000)) return;
                     App._lastVisibilityPull = now;
                     console.log('[SYNC] Tab became visible — pulling critical collections...');
                     CORE._isSyncing = true;
@@ -63297,6 +64574,10 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             // P3-2: Clear periodic sync interval
             if (App._syncIntervalId) { clearInterval(App._syncIntervalId); App._syncIntervalId = null; }
             if (App._pendingEmployeePoll) { clearInterval(App._pendingEmployeePoll); App._pendingEmployeePoll = null; }
+
+            // P4: Clear module auto-refresh timers to prevent ghost rerenders
+            try { if (typeof PDGModule !== 'undefined' && PDGModule._autoRefreshTimer) { clearInterval(PDGModule._autoRefreshTimer); PDGModule._autoRefreshTimer = null; } } catch(e){}
+            try { if (typeof CloudStatusBanner !== 'undefined' && CloudStatusBanner._checkInterval) { clearInterval(CloudStatusBanner._checkInterval); CloudStatusBanner._checkInterval = null; } } catch(e){}
 
             // Nettoyer l'état utilisateur
             if (CORE.state) CORE.state.currentUser = null;
@@ -63742,6 +65023,20 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
         // Connexion depuis l'onboarding (onglet "Se connecter")
 
         async onboardingLogin() {
+            // P5: Prevent double-submit (onsubmit + onkeypress firing simultaneously)
+            if (this._loginInProgress) {
+                console.log('[LOGIN] Already in progress — skipping duplicate call');
+                return;
+            }
+            this._loginInProgress = true;
+            try {
+                return await this._doOnboardingLogin();
+            } finally {
+                this._loginInProgress = false;
+            }
+        },
+
+        async _doOnboardingLogin() {
             const emailInput = document.getElementById('login-email');
             const passwordInput = document.getElementById('login-password');
             const errorDiv = document.getElementById('login-error');
@@ -63835,11 +65130,11 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                             }
                         })();
 
-                        // Mark ALL data collections dirty so periodic sync catches anything missed
-                        var dbKeys = Object.keys(CORE.db);
-                        for (var dk = 0; dk < dbKeys.length; dk++) {
-                            if (Array.isArray(CORE.db[dbKeys[dk]]) && CORE.db[dbKeys[dk]].length > 0) {
-                                CORE.markDirty(dbKeys[dk]);
+                        // Mark only ESSENTIAL collections dirty — not all (prevents pushing massive payloads)
+                        var _essentialCols = ['users', 'pointsOfSale', 'categories', 'products', 'notifications'];
+                        for (var dk = 0; dk < _essentialCols.length; dk++) {
+                            if (Array.isArray(CORE.db[_essentialCols[dk]]) && CORE.db[_essentialCols[dk]].length > 0) {
+                                CORE.markDirty(_essentialCols[dk]);
                             }
                         }
 
@@ -66927,39 +68222,44 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             if (!mod) return;
             // Detect module type by checking available methods
             var items = [];
+            var pendingOrders = (CORE.db.orders || []).filter(function(o) { return o.status === 'pending' || o.status === 'new'; }).length;
+            var pendingTransfers = (CORE.db.transferReceipts || []).filter(function(t) { return t.status === 'pending'; }).length;
+            var pendingDeliveries = (CORE.getVisibleDeliveries ? CORE.getVisibleDeliveries().filter(function(d) { return d.status === 'pending' || d.status === 'assigned'; }).length : 0);
+            var unreadNotifs = CORE.getUnreadNotificationCount();
+
             if (mod === VendeurModule || (typeof VendeurModule !== 'undefined' && mod.state && mod.state.posMode !== undefined)) {
                 modName = 'VendeurModule';
                 items = [
-                    { view: 'dashboard', icon: 'layout-grid', label: 'Accueil' },
+                    { view: 'dashboard', icon: 'layout-grid', label: 'Accueil', badge: unreadNotifs },
                     { view: 'pos', icon: 'shopping-cart', label: 'Vente' },
                     { view: 'clients', icon: 'users', label: 'Clients' },
-                    { view: 'orders', icon: 'receipt', label: 'Commandes' },
-                    { view: 'stock', icon: 'package', label: 'Stock' }
+                    { view: 'orders', icon: 'receipt', label: 'Commandes', badge: pendingOrders },
+                    { view: 'stock', icon: 'package', label: 'Stock', badge: pendingTransfers }
                 ];
             } else if (typeof ManagerModule !== 'undefined' && mod === ManagerModule) {
                 modName = 'ManagerModule';
                 items = [
-                    { view: 'dashboard', icon: 'layout-grid', label: 'Accueil' },
+                    { view: 'dashboard', icon: 'layout-grid', label: 'Accueil', badge: unreadNotifs },
                     { view: 'pos', icon: 'store', label: 'PDV' },
-                    { view: 'commandes', icon: 'shopping-cart', label: 'Commandes' },
-                    { view: 'inventory', icon: 'box', label: 'Stock' },
+                    { view: 'commandes', icon: 'shopping-cart', label: 'Commandes', badge: pendingOrders },
+                    { view: 'inventory', icon: 'box', label: 'Stock', badge: pendingTransfers },
                     { view: 'finance', icon: 'wallet', label: 'Finance' }
                 ];
             } else if (typeof PDGModule !== 'undefined' && mod === PDGModule) {
                 modName = 'PDGModule';
                 items = [
-                    { view: 'overview', icon: 'layout-grid', label: 'Accueil' },
-                    { view: 'commandes', icon: 'shopping-cart', label: 'Commandes' },
-                    { view: 'deliveries', icon: 'truck', label: 'Livraisons' },
+                    { view: 'overview', icon: 'layout-grid', label: 'Accueil', badge: unreadNotifs },
+                    { view: 'commandes', icon: 'shopping-cart', label: 'Commandes', badge: pendingOrders },
+                    { view: 'deliveries', icon: 'truck', label: 'Livraisons', badge: pendingDeliveries },
                     { view: 'finance', icon: 'wallet', label: 'Finance' },
                     { view: 'reports', icon: 'bar-chart-2', label: 'Rapports' }
                 ];
             } else if (typeof GestionnaireModule !== 'undefined' && mod === GestionnaireModule) {
                 modName = 'GestionnaireModule';
                 items = [
-                    { view: 'dashboard', icon: 'layout-grid', label: 'Accueil' },
-                    { view: 'stocks', icon: 'package', label: 'Stocks' },
-                    { view: 'deliveries', icon: 'truck', label: 'Livraisons' },
+                    { view: 'dashboard', icon: 'layout-grid', label: 'Accueil', badge: unreadNotifs },
+                    { view: 'stocks', icon: 'package', label: 'Stocks', badge: pendingTransfers },
+                    { view: 'deliveries', icon: 'truck', label: 'Livraisons', badge: pendingDeliveries },
                     { view: 'team', icon: 'users', label: 'Équipe' },
                     { view: 'finance', icon: 'wallet', label: 'Finance' }
                 ];
@@ -66969,7 +68269,9 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
             var currentView = mod.state ? mod.state.currentView : '';
             nav.innerHTML = items.map(function(item) {
                 var isActive = currentView === item.view;
-                return '<button class="' + (isActive ? 'active' : '') + '" onclick="' + (modName || 'App.getActiveModule()') + '.navigateTo(\'' + item.view + '\'); closeSidebar();">' +
+                var badgeHtml = (item.badge && item.badge > 0) ? '<span style="position:absolute;top:2px;right:50%;transform:translateX(14px);min-width:16px;height:16px;background:#ef4444;color:#fff;font-size:10px;font-weight:800;border-radius:9999px;display:flex;align-items:center;justify-content:center;padding:0 4px;animation:pulse 2s infinite;box-shadow:0 0 8px rgba(239,68,68,0.4);">' + (item.badge > 99 ? '99+' : item.badge) + '</span>' : '';
+                return '<button style="position:relative;" class="' + (isActive ? 'active' : '') + '" onclick="' + (modName || 'App.getActiveModule()') + '.navigateTo(\'' + item.view + '\'); closeSidebar();">' +
+                    badgeHtml +
                     '<i data-lucide="' + item.icon + '"></i>' +
                     '<span>' + item.label + '</span>' +
                 '</button>';
@@ -67013,7 +68315,7 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
         // Also hook into navigateTo for each module
         ['VendeurModule','ManagerModule','PDGModule','GestionnaireModule'].forEach(function(name) {
             try {
-                var mod = eval(name);
+                var mod = window[name];
                 if (mod && mod.navigateTo) {
                     var origNav = mod.navigateTo.bind(mod);
                     mod.navigateTo = function(view) {
