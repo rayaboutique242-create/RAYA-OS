@@ -6270,15 +6270,27 @@ select.form-input { cursor: pointer; }
             // Autres rôles: doivent être dans le même POS
             // Dériver user.pos depuis storeId si non défini
             const userPos = user.pos || user.storeId || user.pointOfSaleId;
-            if (!userPos) return false;
+            if (!userPos) {
+                // SAFETY: If userPos is undefined, gestionnaire should still see products
+                // assigned to their POS via posStocks. Log this but don't block all access.
+                if (resourceType === 'product') {
+                    console.warn('[canAccess] userPos is undefined for user:', user.name, user.role, '— allowing product access');
+                    return true;
+                }
+                return false;
+            }
+            const strUserPos = String(userPos);
 
             switch(resourceType) {
                 case 'product':
                     // Vendeur/Gestionnaire: produits de leur POS seulement
                     const productPosId = resource?.posId ?? resource?.storeId ?? resource?.pointOfSaleId ?? resource?.pos ?? resource?.store?.id;
+                    if (productPosId != null && String(productPosId) === strUserPos) return true;
                     if (productPosId == userPos) return true;
-                    // Vérifier aussi posStocks (produits transférés)
-                    if (resource?.posStocks && resource.posStocks[userPos]) return true;
+                    // Vérifier aussi posStocks (produits transférés) - check both raw and string key
+                    if (resource?.posStocks) {
+                        if (resource.posStocks[userPos] || resource.posStocks[strUserPos]) return true;
+                    }
                     return false;
 
                 case 'order':
