@@ -42952,8 +42952,9 @@ Rapport généré par le système d'IA de gestion du stock
 
         showNewProductModal(forcedPos = null) {
             const currentUser = CORE.state.currentUser || {};
-            const categories = CORE.db.categories.map(c => ({value: c.id, label: c.name}));
+            const categories = (CORE.db.categories || []).map(c => ({value: c.id, label: c.name}));
             const posList = (CORE.db.pointsOfSale || []).map(p => ({value: p.id, label: p.name}));
+            console.log('[NewProduct] Modal opening, forcedPos:', forcedPos, 'categories:', categories.length, 'posList:', posList.length, 'role:', currentUser.role, 'pos:', currentUser.pos);
 
             // Si gestionnaire assigné à un POS, forcer ce POS et le rendre non-modifiable
             const hasAssignedPos = currentUser.role === 'gestionnaire' && currentUser.pos;
@@ -43012,7 +43013,7 @@ Rapport généré par le système d'IA de gestion du stock
 
                         <div class="p-4 bg-blue-50 border border-blue-300 rounded-2xl">
                             <div class="font-black text-blue-900 mb-2">📸 Ajouter des images</div>
-                            <div class="p-4 bg-blue-50 border-2 border-dashed border-blue-300 rounded-2xl text-center cursor-pointer hover:bg-blue-100 transition" onclick="document.getElementById('file_input_new_product').click()">>
+                            <div class="p-4 bg-blue-50 border-2 border-dashed border-blue-300 rounded-2xl text-center cursor-pointer hover:bg-blue-100 transition" onclick="document.getElementById('file_input_new_product').click()">
                                 <i data-lucide="upload-cloud" class="w-8 h-8 text-blue-600 mx-auto mb-2"></i>
                                 <div class="font-black text-blue-900 text-sm">Cliquez pour uploader</div>
                                 <div class="text-xs text-blue-600">ou glissez-déposez les images</div>
@@ -43131,6 +43132,7 @@ Rapport généré par le système d'IA de gestion du stock
         },
 
         createProduct() {
+          try {
             const currentUser = CORE.state.currentUser || {};
             const name = UI.val('mp_name').trim();
             const categoryId = parseInt(UI.val('mp_cat') || '0', 10);
@@ -43145,7 +43147,11 @@ Rapport généré par le système d'IA de gestion du stock
             const barcode = UI.val('mp_barcode').trim();
             const active = UI.val('mp_active') === '1';
 
-            if (!name || !categoryId || (!posId && !isMainWarehouse)) return UI.toast('Nom, catégorie et POS requis', 'warning');
+            console.log('[CreateProduct] name:', name, 'categoryId:', categoryId, 'rawPosVal:', rawPosVal, 'isMainWarehouse:', isMainWarehouse, 'posId:', posId, 'stock:', stock);
+
+            if (!name) return UI.toast('Le nom du produit est requis', 'warning');
+            if (!categoryId) return UI.toast('Veuillez sélectionner une catégorie (créez-en une si la liste est vide)', 'warning');
+            if (!posId && !isMainWarehouse) return UI.toast('Veuillez sélectionner un Point de Vente', 'warning');
             if (price < 0 || stock < 0 || minStock < 0) return UI.toast('Valeurs invalides', 'warning');
 
             // Créer le produit avec posId strict
@@ -43168,7 +43174,8 @@ Rapport généré par le système d'IA de gestion du stock
 
             // Initialiser le stock pour ce POS si applicable
             if (!isMainWarehouse && posId) {
-                created.posStocks[posId] = { stock, price };
+                created.posStocks[String(posId)] = { stock, price, lastUpdated: new Date().toISOString() };
+                CORE.save(); // Persister posStocks
             }
 
             CORE.recordStockMovement({ productId: created.id, type: 'in', qty: stock, note: 'Stock initial (création produit)', ref: `PRD-${created.id}`, posId: posId || null });
@@ -43197,12 +43204,17 @@ Rapport généré par le système d'IA de gestion du stock
             CORE.logAudit('create', 'product', created.id, name, { description: `Produit créé: ${name} (prix: ${price}, stock: ${stock}, POS: ${isMainWarehouse ? 'Dépôt Principal' : CORE.getPOS(posId)?.name || posId})` });
 
             UI.closeModal();
-            UI.toast(isMainWarehouse ? 'Produit créé au Dépôt Principal' : `Produit créé au POS ${CORE.getPOS(posId)?.name || ''}`, 'success');
+            console.log('[CreateProduct] ✅ Product created successfully: id=', created.id, 'name=', name, 'isMainWarehouse=', isMainWarehouse, 'posId=', posId, 'stock=', stock, 'totalProducts=', CORE.db.products.length);
+            UI.toast(isMainWarehouse ? 'Produit créé au Dépôt Principal ✅' : `Produit créé au POS ${CORE.getPOS(posId)?.name || ''} ✅`, 'success');
 
             // Re-render avec un petit délai pour assurer que tout est sauvegardé
             setTimeout(() => {
                 App.rerender();
             }, 100);
+          } catch(err) {
+            console.error('[CreateProduct] ❌ Error creating product:', err);
+            UI.toast('Erreur lors de la création: ' + err.message, 'error');
+          }
         },
 
         newProductImages: [],
