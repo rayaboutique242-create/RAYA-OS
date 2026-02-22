@@ -8767,7 +8767,48 @@ select.form-input { cursor: pointer; }
         },
 
         getUnreadNotificationCount() {
-            return (this.db.notifications || []).filter(n => !n.read).length;
+            const userPosId = this.state.currentUser?.pos || this.state.currentUser?.storeId;
+            const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+            return (this.db.notifications || []).filter(n => {
+                if (n.read) return false;
+                // Ignorer les notifications trop anciennes (> 30 jours)
+                if (n.createdAt && n.createdAt < thirtyDaysAgo) return false;
+                // Ignorer les notifications destinées à un autre POS
+                if (n.posId && userPosId && String(n.posId) !== String(userPosId)) {
+                    // Sauf pour le manager qui voit tout
+                    if (this.state.currentUser?.role !== 'manager' && this.state.currentUser?.role !== 'pdg') return false;
+                }
+                return true;
+            }).length;
+        },
+
+        markAllNotificationsRead() {
+            (this.db.notifications || []).forEach(n => {
+                if (!n.read) {
+                    n.read = true;
+                    n.readAt = new Date().toISOString();
+                }
+            });
+            this.save();
+            if (typeof App !== 'undefined' && App.rerender) App.rerender();
+            UI.toast('Toutes les notifications marquées comme lues', 'success');
+        },
+
+        cleanOldNotifications() {
+            const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+            const before = (this.db.notifications || []).length;
+            this.db.notifications = (this.db.notifications || []).filter(n => {
+                // Keep unread notifications regardless of age
+                if (!n.read) return true;
+                // Remove read notifications older than 30 days
+                if (n.createdAt && n.createdAt < thirtyDaysAgo) return false;
+                return true;
+            });
+            const removed = before - this.db.notifications.length;
+            if (removed > 0) {
+                console.log('[Notifications] Cleaned ' + removed + ' old read notifications');
+                this.save();
+            }
         },
 
         getNotificationsByType(type) {
@@ -24626,7 +24667,7 @@ select.form-input { cursor: pointer; }
                             ${this.renderNavIcon('dashboard', 'layout-dashboard', t('menu.dashboard'), CORE.getUnreadNotificationCount())}
                             ${this.renderNavIcon('pos', 'shopping-cart', t('menu.pos'))}
                             ${this.renderNavIcon('clients', 'users', t('menu.clients'))}
-                            ${this.renderNavIcon('orders', 'receipt', t('menu.orders'), (CORE.db.orders || []).filter(o => o.status === 'pending' || o.status === 'new').length)}
+                            ${this.renderNavIcon('orders', 'receipt', t('menu.orders'), (CORE.db.orders || []).filter(o => (o.status === 'pending' || o.status === 'new') && o.createdAt && o.createdAt > new Date(Date.now() - 7*24*60*60*1000).toISOString()).length)}
                             ${this.renderNavIcon('stock', 'package', t('menu.stock'), (typeof GestionnaireModule !== 'undefined' && GestionnaireModule.getPendingIncomingTransfers ? GestionnaireModule.getPendingIncomingTransfers().length : 0))}
                             ${this.renderNavIcon('livreurs', 'bike', t('menu.deliverers'))}
                             ${this.renderNavIcon('reservations', 'calendar-clock', t('menu.reservations'))}
@@ -52512,8 +52553,8 @@ Rapport généré par le système d'IA de gestion du stock
                             ${this.renderNav('analytics','bar-chart-3','Analytique')}
                             ${this.renderNav('pos','store','Points de vente')}
                             ${this.renderNav('inventory','box','Stocks (Pro)')}
-                            ${this.renderNav('main-stock','warehouse','🏭 Stock Dépôt Principal', (CORE.db.transferReceipts || []).filter(t => t.status === 'pending').length)}
-                            ${this.renderNav('commandes','shopping-cart','Commandes (Ventes)', (CORE.db.orders || []).filter(o => o.status === 'pending' || o.status === 'new').length)}
+                            ${this.renderNav('main-stock','warehouse','🏭 Stock Dépôt Principal', (CORE.db.stockTransfers || []).filter(t => t.status === 'pending').length)}
+                            ${this.renderNav('commandes','shopping-cart','Commandes (Ventes)', (CORE.db.orders || []).filter(o => (o.status === 'pending' || o.status === 'new') && o.createdAt && o.createdAt > new Date(Date.now() - 7*24*60*60*1000).toISOString()).length)}
                             ${this.renderNav('finance','wallet','Finances')}
                             ${this.renderNav('team','users','Équipe')}
                             ${this.renderNav('toolbox','command','Centre Commande')}
@@ -60474,9 +60515,9 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                         <!-- Navigation -->
                         <nav class="flex-1 px-4 py-2 space-y-1 overflow-y-auto scrollbar-thin scrollbar-thumb-purple-500/30 scrollbar-track-transparent">
                             ${this.renderNavItem('overview','layout-dashboard','Aperçu', CORE.getUnreadNotificationCount())}
-                            ${this.renderNavItem('orders','receipt','Commandes (ventes)', (CORE.db.orders || []).filter(o => o.status === 'pending' || o.status === 'new').length)}
+                            ${this.renderNavItem('orders','receipt','Commandes (ventes)', (CORE.db.orders || []).filter(o => (o.status === 'pending' || o.status === 'new') && o.createdAt && o.createdAt > new Date(Date.now() - 7*24*60*60*1000).toISOString()).length)}
                             ${this.renderNavItem('commandes','shopping-cart','Gestion réappro')}
-                            ${this.renderNavItem('main-stock','warehouse','🏭 Stock Dépôt Principal', (CORE.db.transferReceipts || []).filter(t => t.status === 'pending').length)}
+                            ${this.renderNavItem('main-stock','warehouse','🏭 Stock Dépôt Principal', (CORE.db.stockTransfers || []).filter(t => t.status === 'pending').length)}
                             ${this.renderNavItem('deliveries','truck','Livraisons', (CORE.getVisibleDeliveries ? CORE.getVisibleDeliveries().filter(d => d.status === 'pending' || d.status === 'assigned').length : 0))}
                             ${this.renderNavItem('stock','box','Stock')}
                             ${this.renderNavItem('pos','store','Points de vente')}
@@ -64210,6 +64251,8 @@ Marie Martin,mmartin,marie@example.com,pass456,gestionnaire,Centre-1
                 CORE.reconcileFinance();
                 CORE.initDailyDigestScheduler();
                 CORE.initPendingArrivalsScheduler();
+                // Nettoyer les vieilles notifications lues (> 30 jours)
+                CORE.cleanOldNotifications();
                 if (typeof OfflineManager !== 'undefined') {
                     OfflineManager.init();
                 }
